@@ -21,6 +21,7 @@ Write-Host "Starting data collection $($currentDate) @ $($compSys.Name)"
 $description       = read-host "Enter additional description for $($compSys.Name)"
 Write-Host "Collecting osInfo."
 $osInfo            = Get-CimInstance -ClassName CIM_OperatingSystem
+$LastBoot		   = Get-Date($osInfo.lastbootuptime) -Format "dd.MM.yyyy HH:mm"
 Write-Host "Collecting Azure info."
 $azureTenantID 	   = Check-IfAzureJoined
 $azureJoinedByUser = Check-WhoJoinedAzure
@@ -79,6 +80,7 @@ $collectedData | Add-Member -MemberType NoteProperty -Name TenantID -Value $azur
 $collectedData | Add-Member -MemberType NoteProperty -Name TenantJoinedBy -Value $azureJoinedByUser
 $collectedData | Add-Member -MemberType NoteProperty -Name OS -Value $osInfo.Caption
 $collectedData | Add-Member -MemberType NoteProperty -Name OS_Version -Value $("$($osInfo.Version) Build $($osInfo.BuildNumber)")
+$collectedData | Add-Member -MemberType NoteProperty -Name LastBoot -Value $lastBoot
 $collectedData | Add-Member -MemberType NoteProperty -Name Current_user -Value $currentUser
 $collectedData | Add-Member -MemberType NoteProperty -Name User_belongs_to -Value $currentUserGroups
 $collectedData | Add-Member -MemberType NoteProperty -Name All_local_admins -Value $allLocalAdmins
