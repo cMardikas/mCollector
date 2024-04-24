@@ -178,27 +178,47 @@ return $BitLockerStatus
 
 function Check-IfAzureJoined {
 
-$subKey = Get-Item "HKLM:/SYSTEM/CurrentControlSet/Control/CloudDomainJoin/JoinInfo"
-$guids = $subKey.GetSubKeyNames()
+$regKey = "HKLM:/SYSTEM/CurrentControlSet/Control/CloudDomainJoin/JoinInfo"
 
-foreach($guid in $guids) {
-    $guidSubKey = $subKey.OpenSubKey($guid);
-    $tenantId = $guidSubKey.GetValue("TenantId");
-}
+$test = test-path -path $regKey
+
+if ($test) {
+	$subKey = Get-Item $regKey
+    $guids = $subKey.GetSubKeyNames()
+
+	foreach($guid in $guids) {
+		$guidSubKey = $subKey.OpenSubKey($guid);
+		$tenantId = $guidSubKey.GetValue("TenantId");
+	}
+
 return $tenantId
+
+}
+
+return "Not joined."
 }
 
 function Check-WhoJoinedAzure {
 
-$subKey = Get-Item "HKLM:/SYSTEM/CurrentControlSet/Control/CloudDomainJoin/JoinInfo"
-$guids = $subKey.GetSubKeyNames()
+$regKey = "HKLM:/SYSTEM/CurrentControlSet/Control/CloudDomainJoin/JoinInfo"
 
-foreach($guid in $guids) {
-    $guidSubKey = $subKey.OpenSubKey($guid);
-    $userEmail = $guidSubKey.GetValue("UserEmail");
-}
+$test = test-path -path $regKey
+
+if ($test) {
+	$subKey = Get-Item $regKey
+    $guids = $subKey.GetSubKeyNames()
+
+	foreach($guid in $guids) {
+		$guidSubKey = $subKey.OpenSubKey($guid);
+		$tenantId = $guidSubKey.GetValue("UserEmail");
+	}
 
 return $userEmail
+
+}
+
+return "Not joined."
+
 }
 
 # Execute main function
