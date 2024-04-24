@@ -21,14 +21,15 @@ Write-Host "Starting data collection $($currentDate) @ $($compSys.Name)"
 $description       = read-host "Enter additional description for $($compSys.Name)"
 Write-Host "Collecting osInfo."
 $osInfo            = Get-CimInstance -ClassName CIM_OperatingSystem
+Write-Host "Collecting Azure info."
+$azureTenantID 	   = Check-IfAzureJoined
+$azureJoinedByUser = Check-WhoJoinedAzure
 Write-Host "Collecting current user."
 $currentUser       = (Get-CimInstance CIM_ComputerSystem | select username).username
 Write-Host "Collecting current user group membership."
-$currentUserGroups = Get-Groups
+$currentUserGroups = Get-Groups 
 Write-Host "Collecting local admin accounts."
-$allLocalAdmins    = Get-LocalGroupMember Administrators | Select Name
-Write-Host "Collecting Enabled local admin accounts."
-$activeLocalAdmins = Get-LocalGroupMember Administrators | Where-Object { (Get-LocalUser $_.SID -EA 0).Enabled } | Select Name
+$allLocalAdmins    = net localgroup administrators | where {$_ -AND $_ -notmatch "command completed successfully"} | select -skip 4
 Write-Host "Collecting BitLocker status."
 $statusBitLocker   = Get-BitLockerStatus
 Write-Host "Collecting Windows Update status."
@@ -74,12 +75,13 @@ $collectedData | Add-Member -MemberType NoteProperty -Name Description -Value $d
 $collectedData | Add-Member -MemberType NoteProperty -Name ComputerName -Value $compSys.Name
 $collectedData | Add-Member -MemberType NoteProperty -Name Domain -Value $compSys.Domain
 $collectedData | Add-Member -MemberType NoteProperty -Name Workgroup -Value $compSys.Workgroup
+$collectedData | Add-Member -MemberType NoteProperty -Name TenantID -Value $azureTenantID
+$collectedData | Add-Member -MemberType NoteProperty -Name TenantJoinedBy -Value $azureJoinedByUser
 $collectedData | Add-Member -MemberType NoteProperty -Name OS -Value $osInfo.Caption
 $collectedData | Add-Member -MemberType NoteProperty -Name OS_Version -Value $("$($osInfo.Version) Build $($osInfo.BuildNumber)")
 $collectedData | Add-Member -MemberType NoteProperty -Name Current_user -Value $currentUser
 $collectedData | Add-Member -MemberType NoteProperty -Name User_belongs_to -Value $currentUserGroups
 $collectedData | Add-Member -MemberType NoteProperty -Name All_local_admins -Value $allLocalAdmins
-$collectedData | Add-Member -MemberType NoteProperty -Name Enabled_local_admins -Value $activeLocalAdmins
 $collectedData | Add-Member -MemberType NoteProperty -Name Bitlocker-C -Value $statusBitLocker
 $collectedData | Add-Member -MemberType NoteProperty -Name Updates_lastSearchSuccessDate -Value $lastSearchSuccessDate
 $collectedData | Add-Member -MemberType NoteProperty -Name Updates_lastInstallationSuccessDate -Value $lastInstallationSuccessDate
@@ -155,6 +157,7 @@ function Get-Groups {
     }
 }
 
+
 function Get-BitLockerStatus {
 [CmdletBinding()]
 	param (
@@ -170,6 +173,32 @@ function Get-BitLockerStatus {
 	$BitLockerStatus = $false
 	}
 return $BitLockerStatus
+}
+
+
+function Check-IfAzureJoined {
+
+$subKey = Get-Item "HKLM:/SYSTEM/CurrentControlSet/Control/CloudDomainJoin/JoinInfo"
+$guids = $subKey.GetSubKeyNames()
+
+foreach($guid in $guids) {
+    $guidSubKey = $subKey.OpenSubKey($guid);
+    $tenantId = $guidSubKey.GetValue("TenantId");
+}
+return $tenantId
+}
+
+function Check-WhoJoinedAzure {
+
+$subKey = Get-Item "HKLM:/SYSTEM/CurrentControlSet/Control/CloudDomainJoin/JoinInfo"
+$guids = $subKey.GetSubKeyNames()
+
+foreach($guid in $guids) {
+    $guidSubKey = $subKey.OpenSubKey($guid);
+    $userEmail = $guidSubKey.GetValue("UserEmail");
+}
+
+return $userEmail
 }
 
 # Execute main function
