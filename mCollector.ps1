@@ -1,5 +1,14 @@
 ﻿#Small script to collect some windows data.
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+try{
+	#Allow running unsigned scripts as current user
+    Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+}
+catch {
+    #Do Nothing
+}
+
+
 $FormatEnumerationLimit = -1
 $currentPath=(Split-Path((Get-Variable MyInvocation -Scope 0).Value).MyCommand.Path).Trim()
 
@@ -29,7 +38,7 @@ $installedWindowsUpdates  = Get-CimInstance -ClassName Win32_QuickFixEngineering
 Write-Host "Collecting installed software."
 $installedSoftware = Get-CimInstance -ClassName Win32_Product | Select Vendor,Name,Version,InstallDate | sort InstallDate -des
 Write-Host "Collecting network configuration."
-$ipConfig = Get-NetAdapter | Get-NetIPAddress |  Select ifIndex, InterfaceAlias, AddressFamily, IPv4Address, IPv6Address, PrefixLength
+$ipConfig = Get-NetAdapter | Get-NetIPAddress  -Erroraction silentlycontinue |  Select ifIndex, InterfaceAlias, AddressFamily, IPv4Address, IPv6Address, PrefixLength
 $routingTable = Get-NetRoute -AddressFamily IPv4 -State Alive | Select InterfaceIndex, InterfaceAlias,DestinationPrefix, NextHop, RouteMetric
 $routesToNonLocalDST = Get-NetRoute | Where-Object -FilterScript { $_.NextHop -Ne "::" } | Where-Object -FilterScript { $_.NextHop -Ne "0.0.0.0" } | Where-Object -FilterScript { ($_.NextHop.SubString(0,6) -Ne "fe80::") } | Select ifIndex, DestinationPrefix, NextHop, RouteMetric
 #NetworkCategogry={Public,Private, Domain}; IPv4Connectivity = {Disconnected, NoTraffic, Subnet, LocalNetwork, Internet}
@@ -80,8 +89,8 @@ $collectedData | Add-Member -MemberType NoteProperty -Name Non_standard_win_serv
 $collectedData | Add-Member -MemberType NoteProperty -Name Non_MS_scheduled_tasks -Value $nonMSScheduledTasks
 $collectedData | Add-Member -MemberType NoteProperty -Name Firewall -Value $firewallStatus
 $collectedData | Add-Member -MemberType NoteProperty -Name Antivirus -Value $antivirusStatus
-$collectedData | Add-Member -MemberType NoteProperty -Name AV_enabled -Value $Enabled
-$collectedData | Add-Member -MemberType NoteProperty -Name AV_upToDate -Value $UpToDate
+$collectedData | Add-Member -MemberType NoteProperty -Name AV_enabled -Value $AV_Enabled
+$collectedData | Add-Member -MemberType NoteProperty -Name AV_upToDate -Value $AV_UpToDate
 $collectedData | Add-Member -MemberType NoteProperty -Name IP_config -Value $ipConfig
 $collectedData | Add-Member -MemberType NoteProperty -Name IP_routing -Value $routingTable
 $collectedData | Add-Member -MemberType NoteProperty -Name IP_routing_non_local_dst -Value $routesToNonLocalDST
@@ -127,9 +136,6 @@ Function ConvertTo-Hex {
 }
 
 function Get-Groups {
-    Param(
-        [string]$isMember
-    )
     
     if($isMember)
     {
@@ -158,10 +164,10 @@ function Get-BitLockerStatus {
 )
 	$cmd = "(New-Object -ComObject Shell.Application).NameSpace('$DriveLetter').Self.ExtendedProperty('System.Volume.BitLockerProtection')"
 	$bitLockerResult = Invoke-Expression -Command $cmd
-	if ($bitLockerResult -eq "0" -or $bitLockerResult -eq "2") {
-		$BitLockerStatus = $false
-	}	elseif ($bitLockerResult -eq "1") {
-	$BitLockerStatus = $true
+	if ($bitLockerResult -eq "1") {
+		$BitLockerStatus = $true
+	}	else{
+	$BitLockerStatus = $false
 	}
 return $BitLockerStatus
 }
