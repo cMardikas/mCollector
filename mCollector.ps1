@@ -8,7 +8,6 @@ catch {
     #Do Nothing
 }
 
-
 $FormatEnumerationLimit = -1
 $currentPath=(Split-Path((Get-Variable MyInvocation -Scope 0).Value).MyCommand.Path).Trim()
 
@@ -61,12 +60,9 @@ Write-Host "Collecting info about windows firewall."
 $firewallStatus = Get-NetFireWallProfile | Select Profile, Enabled, DefaultInboundAction,DefaultOutboundAction,AllowInboundRules, AllowLocalFirewallRules, AllowLocalIPsecRules, AllowUserApps, AllowUserPorts, DisabledInterfaceAliases
 #https://jdhitsolutions.com/blog/powershell/5187/get-antivirus-product-status-with-powershell/
 Write-Host "Collecting info about antivirus."
-$antiVirusStatus = Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntivirusProduct | Select displayName, productState, timestamp 
+$avProducts = Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntivirusProduct | Select displayName, productState, timestamp 
 
-$hx = ConvertTo-Hex $antivirusStatus.ProductState
 
-$AV_UpToDate = Get-AV-UpToDate $hx.Substring(5)
-$AV_Enabled  = Get-AV-Enabled $hx.Substring(3, 2)
 
 Write-Host "Processing collected data."
 $collectedData = New-Object -TypeName psobject
@@ -92,16 +88,21 @@ $collectedData | Add-Member -MemberType NoteProperty -Name Software -Value $inst
 $collectedData | Add-Member -MemberType NoteProperty -Name Non_standard_win_services -Value $nonStandardWinServices
 $collectedData | Add-Member -MemberType NoteProperty -Name Non_MS_scheduled_tasks -Value $nonMSScheduledTasks
 $collectedData | Add-Member -MemberType NoteProperty -Name Firewall -Value $firewallStatus
-$collectedData | Add-Member -MemberType NoteProperty -Name Antivirus -Value $antivirusStatus
-$collectedData | Add-Member -MemberType NoteProperty -Name AV_enabled -Value $AV_Enabled
-$collectedData | Add-Member -MemberType NoteProperty -Name AV_upToDate -Value $AV_UpToDate
+$collectedData | Add-Member -MemberType NoteProperty -Name Antivirus -Value $avProducts
+
+foreach ($avProduct in $avProducts)
+{
+  $avStatus = Get-AV-Status $avProduct.productState $avProduct.displayName
+  $collectedData | Add-Member -MemberType NoteProperty -Name $avProduct.displayName -Value $avStatus
+}
+
 $collectedData | Add-Member -MemberType NoteProperty -Name IP_config -Value $ipConfig
 $collectedData | Add-Member -MemberType NoteProperty -Name IP_routing -Value $routingTable
 $collectedData | Add-Member -MemberType NoteProperty -Name IP_routing_non_local_dst -Value $routesToNonLocalDST
 $collectedData | Add-Member -MemberType NoteProperty -Name Net_connection_profile -Value $netConnectionProfile
 
 Write-Host "Saving collected data to $currentPath\$($compSys.Name).json"
-$collectedData | ConvertTo-Json -depth 100 | Set-Content "$currentPath\$($compSys.Name).json"
+$collectedData | ConvertTo-EnumsAsStrings | ConvertTo-Json -depth 100 | Set-Content "$currentPath\$($compSys.Name).json"
 Get-FileHash "$currentPath\$($compSys.Name).json"
 Write-Host "Hash written to $currentPath\$($compSys.Name).sha256"
 Get-FileHash "$currentPath\$($compSys.Name).json" | Set-Content "$currentPath\$($compSys.Name).sha256"
@@ -109,35 +110,111 @@ Write-Host "All done, have fun!"
 
 }
 
+Filter ConvertTo-EnumsAsStrings ([int] $Depth = 10, [int] $CurrDepth = 0) {
+
+  if ($CurrDepth -gt $Depth) {
+    Write-Error "Recursion exceeded depth limit of $Depth"
+    return $null
+  }
+
+  Switch ($_) {
+    { $_ -is [enum] -or $_ -is [version] -or $_ -is [IPAddress] -or $_ -is [Guid] } {
+      $_.ToString()
+    }
+    { $_ -is [datetimeoffset] } {
+      $_.UtcDateTime.ToString('o')
+    }
+    { $_ -is [datetime] } {
+      $_.ToUniversalTime().ToString('o')
+    }
+    { $_ -is [timespan] } {
+      $_.TotalSeconds
+    }
+    { $null -eq $_ -or $_.GetType().IsPrimitive -or $_ -is [string] -or $_ -is [decimal] } {
+      $_
+    }
+    { $_ -is [hashtable] } {
+      $ht = [ordered]@{}
+      $_.GetEnumerator() | ForEach-Object {
+        $ht[$_.Key] = ($_.Value | ConvertTo-EnumsAsStrings -Depth $Depth -CurrDepth ($CurrDepth + 1))
+      }
+      if ($ht.Keys.Count) {
+        $ht
+      }
+    }
+    { $_ -is [pscustomobject] } {
+      $ht = [ordered]@{}
+      $_.PSObject.Properties | ForEach-Object {
+        if ($_.MemberType -eq 'NoteProperty') {
+          Switch ($_) {
+            { $_.Value -is [array] -and $_.Value.Count -eq 0 } {
+              $ht[$_.Name] = @()
+            }
+            { $_.Value -is [hashtable] -and $_.Value.Keys.Count -eq 0 } {
+              $ht[$_.Name] = @{}
+            }
+            Default {
+              $ht[$_.Name] = ($_.Value | ConvertTo-EnumsAsStrings -Depth $Depth -CurrDepth ($CurrDepth + 1))
+            }
+          }
+        }
+      }
+      if ($ht.Keys.Count) {
+        $ht
+      }
+    }
+    Default {
+      Write-Error "Type not supported: $($_.GetType().ToString())"
+    }
+  }
+}
+
+Function Get-AV-Status {
+    Param([UInt32]$state,[string]$dName)
+
+# define bit flags
+
+[Flags()] enum ProductState 
+{
+      Off         = 0x0000
+      On          = 0x1000
+      Snoozed     = 0x2000
+      Expired     = 0x3000
+}
+
+[Flags()] enum SignatureStatus
+{
+      UpToDate     = 0x00
+      OutOfDate    = 0x10
+}
+
+[Flags()] enum ProductOwner
+{
+      NonMs        = 0x000
+      Windows      = 0x100
+}
+
+# define bit masks
+
+[Flags()] enum ProductFlags
+{
+      SignatureStatus = 0x00F0
+      ProductOwner    = 0x0F00
+      ProductState    = 0xF000
+}
 
 
-Function Get-AV-UpToDate {
-    Param([string]$end)
+# decode bit flags by masking the relevant bits, then convert and return result
 
-if ($end -eq "00") {
-    return $true
-} else {
-    return $false
+return [PSCustomObject]@{
+      Product = $dName
+      ProductState = [ProductState]($state -band [ProductFlags]::ProductState)
+      SignatureStatus = [SignatureStatus]($state -band [ProductFlags]::SignatureStatus)
+      Owner = [ProductOwner]($state -band [ProductFlags]::ProductOwner)
 }
     
 }
 
-
-Function Get-AV-Enabled {
-    Param([string]$mid)
-
-if ($mid -match "00|01") {
-    return $false
-} else {
-    return $true
-}
-    
-}
-
-Function ConvertTo-Hex {
-    Param([int]$Number)
-		'0x{0:x}' -f $Number
-}
 
 function Get-Groups {
     
