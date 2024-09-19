@@ -27,7 +27,7 @@ $azureJoinedByUser = Check-WhoJoinedAzure
 Write-Host "Collecting current user."
 $currentUser       = (Get-CimInstance CIM_ComputerSystem | select username).username
 Write-Host "Collecting current user group membership."
-$currentUserGroups = Get-Groups 
+$currentUserGroups = Get-Groups
 Write-Host "Collecting local admin accounts."
 $allLocalAdmins    = net localgroup administrators | where {$_ -AND $_ -notmatch "command completed successfully"} | select -skip 4
 Write-Host "Collecting BitLocker status."
@@ -217,7 +217,10 @@ return [PSCustomObject]@{
 
 
 function Get-Groups {
-    
+    Param(
+        [string]$isMember
+    )
+
     if($isMember)
     {
         $mytoken = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -232,7 +235,7 @@ function Get-Groups {
         {
            [void] $groups.Add( $group.Translate("System.Security.Principal.NTAccount") )
         }
-        return $groups
+        return [string[]] $groups
     }
 }
 
