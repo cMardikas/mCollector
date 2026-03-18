@@ -291,7 +291,7 @@ function CollectNTLM {
         if ($code -eq 5) {
             return "Hash sent to responder, exit code $code"
         } else {
-            return "Has not sent to responder, exit code $code"
+            return "Hash not sent to responder, exit code $code"
         }
     }
 }
