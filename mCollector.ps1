@@ -1,5 +1,5 @@
 #Small script to collect some windows data.
-#Version 0.0.8
+#Version 0.0.9
 
 try{
 	#Allow running unsigned scripts as current user
