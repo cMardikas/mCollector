@@ -1,6 +1,7 @@
-# mCollector Server
+# mCollector Client & Server
 
-Single-binary NTLMv2 hash capture tool with built-in HTTPS file server and automatic name resolution. No Python, no dependencies at runtime — one `make`, one binary.
+Server is a single-binary NTLMv2 hash capture tool with built-in HTTPS file server and automatic name resolution. No Python, no dependencies at runtime — one `make`, one binary.
+Client is a powershell based script.
 
 When a Windows machine accesses `\\mytt`, mCollector resolves the name via mDNS/LLMNR, captures the NTLMv2 hash over SMB2, and logs it in hashcat-ready format.
 
