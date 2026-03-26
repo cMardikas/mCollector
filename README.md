@@ -30,8 +30,9 @@ On the Windows target, open `cmd` or `Run` (Win+R):
 ```
 
 Or run the collection script directly in memory:
+Trust self made cert & force TLS12
 ```
-powershell -ep bypass -c "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;[Net.ServicePointManager]::ServerCertificateValidationCallback={$true};IEX(New-Object Net.WebClient).DownloadString('https://mytt.local/mCollector.ps1')"
+powershell -ep bypass -c "Add-Type 'using System.Net;using System.Net.Security;using System.Security.Cryptography.X509Certificates;public class T:ICertificatePolicy{public bool CheckValidationResult(ServicePoint s,X509Certificate c,WebRequest r,int p){return true;}}';[Net.ServicePointManager]::CertificatePolicy=New-Object T;[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;IEX(New-Object Net.WebClient).DownloadString('https://mytt/mCollector.ps1')
 ```
 
 ## Prerequisites
