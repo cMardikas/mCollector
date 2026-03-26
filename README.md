@@ -40,8 +40,6 @@ powershell -ep bypass -c "[Net.ServicePointManager]::SecurityProtocol=[Net.Secur
 # Debian / Kali / Ubuntu
 sudo apt install build-essential libssl-dev
 
-# Fedora / RHEL
-sudo dnf install gcc openssl-devel
 ```
 
 ## Build
@@ -61,12 +59,8 @@ sudo ./mCollector [options]
 
 ### Important: disable systemd-resolved LLMNR
 
-On systems with `systemd-resolved`, LLMNR packets on port 5355 may be intercepted:
+On systems with `systemd-resolved`, LLMNR packets on port 5355 may be intercepted, disable it.
 
-```bash
-sudo sed -i '/^#\?LLMNR=/c\LLMNR=no' /etc/systemd/resolved.conf
-sudo systemctl restart systemd-resolved
-```
 
 ## Output
 
