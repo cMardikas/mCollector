@@ -17,6 +17,10 @@ When a Windows machine accesses `\\mytt`, mCollector resolves the name via mDNS/
 
 ## Quick Start
 
+Pre-compiled binary is under bin.
+
+To compile:
+
 ```bash
 git clone https://github.com/cmardikas/mCollector.git
 cd mCollector
