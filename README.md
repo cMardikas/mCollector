@@ -45,6 +45,7 @@ sudo apt install build-essential libssl-dev
 ## Build
 
 ```bash
+make clean
 make
 ```
 
