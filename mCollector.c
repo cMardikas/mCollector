@@ -1,5 +1,6 @@
 
 
+
 // mCollector.c — SMB2 NTLMv2 hash capture + HTTPS file server + mDNS/LLMNR
 // Build: gcc -O2 -Wall mCollector.c nameresolver.c mongoose.c -o mCollector -lssl -lcrypto
 // Run:   sudo ./mCollector
@@ -17,7 +18,7 @@
 #include <stdbool.h>
 #include <dirent.h>
 
-#define MCOLLECTOR_VERSION "1.2.1"
+#define MCOLLECTOR_VERSION "1.2.2"
 #define MCOLLECTOR_BUILD   __DATE__ " " __TIME__
 #define HASHES_FILE        "uploads/hashes.txt"
 #define NR_HOSTNAME        "mytt"
@@ -759,7 +760,6 @@ int main(int argc, char **argv) {
         { fprintf(stderr, "[-] HTTPS listen failed\n"); return 1; }
     if (!mg_http_listen(&mgr, "http://0.0.0.0:80", handle_redirect, NULL))
         { fprintf(stderr, "[-] HTTP listen failed\n"); return 1; }
-
     struct mg_connection *lc_smb =
         mg_listen(&mgr, "tcp://0.0.0.0:445", smb_handler, NULL);
     if (!lc_smb)
@@ -798,7 +798,7 @@ int main(int argc, char **argv) {
     printf("\n");
 
     for (;;) {
-        mg_mgr_poll(&mgr, 100);
+        mg_mgr_poll(&mgr, 10);
         nr_poll();
     }
 
@@ -806,5 +806,6 @@ int main(int argc, char **argv) {
     mg_mgr_free(&mgr);
     return 0;
 }
+
 
 
