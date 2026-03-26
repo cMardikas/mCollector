@@ -1,0 +1,231 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+        <meta charset="UTF-8">
+        <title>️ Failide Üleslaadimine</title>
+        <style>
+                body {
+                        background: black;
+                        color: #00ff00;
+                        font-family: monospace;
+                        padding: 2em;
+                }
+                form {
+                        border: 2px dashed #00ff00;
+                        padding: 2em;
+                        max-width: 500px;
+                        margin: auto;
+                        background: #111;
+                }
+                h2 {
+                        text-align: center;
+                        color: #0f0;
+                        text-shadow: 0 0 10px #0f0;
+                }
+                .progress {
+                        width: 100%;
+                        height: 10px;
+                        background: #333;
+                        margin-top: 1em;
+                }
+                .progress-bar {
+                        height: 100%;
+                        width: 0%;
+                        background: #00ff00;
+                }
+                .custom-file {
+                        display: block;
+                        width: 100%;
+                        margin-top: 1em;
+                        background: black;
+                        color: #00ff00;
+                        border: 1px solid #00ff00;
+                        padding: 0.5em;
+                        font-family: inherit;
+                        cursor: pointer;
+                        text-align: center;
+                }
+                a {
+                        color: #0f0;
+                        text-decoration: underline;
+                        display: block;
+                        text-align: center;
+                        margin-top: 2em;
+                }
+                #dropzone {
+                        border: 2px dashed #0f0;
+                        padding: 2em;
+                        text-align: center;
+                        margin-top: 1em;
+                        background: #222;
+                        cursor: pointer;
+                }
+                .cmdbox {
+                        display: flex;
+                        align-items: center;
+                        background: #111;
+                        border: 1px solid #00ff00;
+                        padding: 0.5em 0.8em;
+                        cursor: pointer;
+                }
+                .cmdbox code {
+                        flex: 1;
+                        color: #00ff00;
+                        font-family: monospace;
+                        font-size: 0.9em;
+                }
+                .copyLabel {
+                        color: #555;
+                        font-size: 0.8em;
+                        margin-left: 1em;
+                        white-space: nowrap;
+                }
+        </style>
+</head>
+<body>
+        <h2>[+] Failide üleslaadimine</h2>
+        <form id="uploadForm">
+                <div id="dropzone">Lohista failid siia või klõpsa valimiseks</div>
+                <input type="file" name="files" id="files" multiple style="display:none;">
+                <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+        </form>
+
+        <a href="mCollector.ps1" download>[⇩] Laadi alla PowerShelli skript (mCollector.ps1)</a>
+
+        <div style="max-width:600px; margin: 1.5em auto 0 auto;">
+<p style="color:#00ff00; font-size:0.85em; margin-bottom:0.4em; text-align:center;">Käivita selle käsureaga:</p>
+                <div class="cmdbox" onclick="copyCmd(this)" title="Klõpsa kopeerimiseks">
+                        <code>powershell -ExecutionPolicy ByPass -f mCollector.ps1</code>
+                        <span class="copyLabel">[kopeeri]</span>
+                </div>
+<p style="color:#00ff00; font-size:0.85em; margin-bottom:0.4em; text-align:center; margin-top:1em;">Või käivita see käsurida -:)</p>
+                <div class="cmdbox" onclick="copyCmd(this)" title="Klõpsa kopeerimiseks">
+                        <code style="font-size:0.78em; word-break:break-all;">powershell -ep bypass -c "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;[Net.ServicePointManager]::ServerCertificateValidationCallback={$true};IEX(New-Object Net.WebClient).DownloadString('https://mytt.local/mCollector.ps1')"</code>
+                        <span class="copyLabel">[kopeeri]</span>
+                </div>
+        </div>
+
+        <a href="PingCastle.exe" download>[⇩] Laadi alla PingCastle (PingCastle.exe)</a>
+
+        <script>
+                function copyCmd(el) {
+                        const text = el.querySelector('code').textContent;
+                        const label = el.querySelector('.copyLabel');
+                        navigator.clipboard.writeText(text).then(() => {
+                                label.textContent = '[kopeeritud ✔️]';
+                                label.style.color = '#00ff00';
+                                setTimeout(() => {
+                                        label.textContent = '[kopeeri]';
+                                        label.style.color = '#555';
+                                }, 2000);
+                        });
+                }
+
+                const dropzone = document.getElementById('dropzone');
+                const filesInput = document.getElementById('files');
+
+                dropzone.onclick = () => filesInput.click();
+
+                dropzone.ondragover = (e) => {
+                        e.preventDefault();
+                        dropzone.style.background = '#0a0';
+                };
+
+                dropzone.ondragleave = () => dropzone.style.background = '#222';
+
+                dropzone.ondrop = (e) => {
+                        e.preventDefault();
+                        dropzone.style.background = '#222';
+                        const dt = new DataTransfer();
+                        for (let i = 0; i < filesInput.files.length; i++) dt.items.add(filesInput.files[i]);
+                        for (let i = 0; i < e.dataTransfer.files.length; i++) dt.items.add(e.dataTransfer.files[i]);
+                        filesInput.files = dt.files;
+                        displayFileListAndUpload(dt.files);
+                };
+
+                filesInput.addEventListener('change', () => {
+                        displayFileListAndUpload(filesInput.files);
+                });
+
+                let uploadCounter = 0;
+                const inProgress = new Set();
+
+                function displayFileListAndUpload(files) {
+                        let list = document.getElementById('fileList');
+                        if (!list) {
+                                list = document.createElement('ul');
+                                list.id = 'fileList';
+                                list.style.marginTop = '1em';
+                                dropzone.parentNode.insertBefore(list, dropzone.nextSibling);
+                        }
+
+                        Array.from(files).forEach(function(file) {
+                                const uid = 'f' + (uploadCounter++);
+
+                                const item = document.createElement('li');
+                                item.textContent = file.name;
+
+                                if (inProgress.has(file.name)) {
+                                        const warn = document.createElement('span');
+                                        warn.textContent = ' ⚠️ Juba laaditakse, vahele jäetud';
+                                        warn.style.color = 'orange';
+                                        item.appendChild(warn);
+                                        list.appendChild(item);
+                                        return;
+                                }
+
+                                inProgress.add(file.name);
+
+                                const bar = document.createElement('div');
+                                bar.className = 'progress';
+                                const fill = document.createElement('div');
+                                fill.className = 'progress-bar';
+                                fill.id = 'bar_' + uid;
+                                bar.appendChild(fill);
+                                item.appendChild(bar);
+
+                                const status = document.createElement('span');
+                                status.id = 'status_' + uid;
+                                status.style.marginLeft = '1em';
+                                item.appendChild(status);
+
+                                list.appendChild(item);
+
+                                const formData = new FormData();
+                                formData.append('files', file);
+
+                                const xhr = new XMLHttpRequest();
+                                xhr.open('POST', '/upload', true);
+
+                                xhr.upload.onprogress = function(e) {
+                                        if (e.lengthComputable) {
+                                                document.getElementById('bar_' + uid).style.width =
+                                                        (e.loaded / e.total * 100) + '%';
+                                        }
+                                };
+
+                                xhr.onload = function() {
+                                        inProgress.delete(file.name);
+                                        if (xhr.status === 200) {
+                                                document.getElementById('bar_' + uid).style.width = '100%';
+                                                document.getElementById('status_' + uid).textContent = '✔️ OK';
+                                        } else {
+                                                document.getElementById('status_' + uid).textContent = '❌ Viga';
+                                        }
+                                };
+
+                                xhr.onerror = function() {
+                                        inProgress.delete(file.name);
+                                        document.getElementById('status_' + uid).textContent = '❌ Ühenduse viga';
+                                };
+
+                                xhr.send(formData);
+                        });
+
+                        filesInput.value = '';
+                }
+        </script>
+</body>
+</html>
+
