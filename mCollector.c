@@ -56,10 +56,11 @@ static int generate_tls_keypair(char **out_cert_pem, char **out_key_pem) {
     EVP_PKEY_CTX_free(kctx);
     if (!pkey) goto cleanup;
 
-    /* Create self-signed X509 certificate */
+    /* Create self-signed X509 v3 certificate */
     x509 = X509_new();
     if (!x509) goto cleanup;
 
+    X509_set_version(x509, 2);  /* v3 — required for SAN extension */
     ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
     X509_gmtime_adj(X509_getm_notBefore(x509), 0);
     X509_gmtime_adj(X509_getm_notAfter(x509), 3650L * 24 * 3600);
