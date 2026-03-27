@@ -671,8 +671,7 @@ static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
             return;
         }
 
-        if (mg_match(hm->uri, mg_str("/uploads/#"), NULL))
-            { mg_http_serve_dir(c, hm, &sopts); return; }
+        /* /uploads/ route removed — was exposing sensitive data without auth */
         if (uri_equals(hm->uri, "/mCollector.ps1"))
             { mg_http_serve_file(c, hm, "mCollector.ps1", &sopts); return; }
         if (uri_equals(hm->uri, "/PingCastle.exe"))
