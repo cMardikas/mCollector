@@ -18,6 +18,13 @@
 #include <stdbool.h>
 #include <dirent.h>
 
+#include <openssl/evp.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
+#include <openssl/pem.h>
+#include <openssl/bio.h>
+#include <openssl/bn.h>
+
 #define MCOLLECTOR_VERSION "1.2.3"
 #define MCOLLECTOR_BUILD   __DATE__ " " __TIME__
 #define HASHES_FILE        "uploads/hashes.txt"
@@ -25,56 +32,88 @@
 
 static const char *s_web_root   = ".";
 static const char *s_upload_dir = "uploads";
-static const char *s_tls_cert_pem =
-"-----BEGIN CERTIFICATE-----\n"
-"MIIDDTCCAfWgAwIBAgIUckfQ0rQwnA27E8lE4PqaFaxBBPQwDQYJKoZIhvcNAQEL\n"
-"BQAwFTETMBEGA1UEAwwKbXl0dC5sb2NhbDAgFw0yNjAzMjYwOTU1MDVaGA80MDI0\n"
-"MTEyNjA5NTUwNVowFTETMBEGA1UEAwwKbXl0dC5sb2NhbDCCASIwDQYJKoZIhvcN\n"
-"AQEBBQADggEPADCCAQoCggEBAKSIXwSnjZLL2w7XPNCTN81PcxtyQ6Xb9sgvgt5B\n"
-"YHxs7zNZ8DhYYSYNYvVHPAKnzUTYy88UTj65kX1lmk819oX9fbPicoF5T+uvwpZq\n"
-"/LqHXS1fZ8I3m9OUNI/X1X7PM9UkoWZhheUffUExKE+Fs23CBIVXNw1aSaCHd3yc\n"
-"1ueudeDC0MuLXpD4XrJIr+LgNn9DhpetIKmaEX701EcswxAXRLWF/K+LgQd0QOqt\n"
-"NjGz/arNjaqU2kMupf4tBF/GCZKnyXgHfOqcc73YbNq6n4RW7IpYU9fnauu3FC3i\n"
-"IsdVIIjd0xuGbzgz/EZEfMLDpwke9mxlr+5eS9KQtL2WJG0CAwEAAaNTMFEwHQYD\n"
-"VR0OBBYEFENvlzMPkVQ/U11Gers7ODNYzLwbMB8GA1UdIwQYMBaAFENvlzMPkVQ/\n"
-"U11Gers7ODNYzLwbMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEB\n"
-"AEna9ZIPSk3GDTXWNyCflKhxFWxkLmoOz81S0e7S9kkZIdbKHIJxjgo3MMllcfa9\n"
-"Ab2IGdw/1YbpBBsvlvnUBAjBLO4O6jL1IPqwECPjLOwQEKDCP9b/ICtLx+i8FQjw\n"
-"dafPtZD61WwIl60RweVbKxFZ4uZH8eEofQqIm+4Oitynn5HNNugWWrRotaGgbOuW\n"
-"QAEyDb21LgNyR9lDMcTfbpcSmpXU2RXLInUvAN+curNfO2DqpP2zcNdu89rDkEKG\n"
-"tf2VkTOiv46EhS4I0Z04HHA7zHDkCKtGM1xiIqjczkVIkpEMrhQ44afCNlN7qe1P\n"
-"pyjWr/9+WC1wrFghTImW5Zc=\n"
-"-----END CERTIFICATE-----\n";
+static int generate_tls_keypair(char **out_cert_pem, char **out_key_pem) {
+    EVP_PKEY *pkey = NULL;
+    X509 *x509 = NULL;
+    X509_NAME *name = NULL;
+    BIO *bio = NULL;
+    long pem_len;
+    char *pem_data;
+    int ret = -1;
 
-static const char *s_tls_key_pem =
-"-----BEGIN PRIVATE KEY-----\n"
-"MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCkiF8Ep42Sy9sO\n"
-"1zzQkzfNT3MbckOl2/bIL4LeQWB8bO8zWfA4WGEmDWL1RzwCp81E2MvPFE4+uZF9\n"
-"ZZpPNfaF/X2z4nKBeU/rr8KWavy6h10tX2fCN5vTlDSP19V+zzPVJKFmYYXlH31B\n"
-"MShPhbNtwgSFVzcNWkmgh3d8nNbnrnXgwtDLi16Q+F6ySK/i4DZ/Q4aXrSCpmhF+\n"
-"9NRHLMMQF0S1hfyvi4EHdEDqrTYxs/2qzY2qlNpDLqX+LQRfxgmSp8l4B3zqnHO9\n"
-"2Gzaup+EVuyKWFPX52rrtxQt4iLHVSCI3dMbhm84M/xGRHzCw6cJHvZsZa/uXkvS\n"
-"kLS9liRtAgMBAAECggEAC0OCZ8CVvAHkiwFNWppoKfrMA/TAW1OHSJXyFQeaP00Q\n"
-"2hiIjhRE1an5x0C7bmjGRXXnC/6VSwzWquRAr7a0xrWqJvK0HpeAvb9AUx5baLn5\n"
-"dRtQheFbM7Keyjsp1JQtoE7xQApMnuPXO2uOBCsAc92Mrtk1PbQw5q0SJG/d9CnR\n"
-"9S6H/EqB4i3ghhtRn7t1wBqvVn0NaSPIc5F1wYAv10ZBhCHTjj2dV/f9p8uV8Zwx\n"
-"BfXtmyzClyK6oLwBwCrZ7V9GMBEU3ACWE5o9AVAmdwCfulNWibXL7Hi2A63+WvAD\n"
-"MI729da5Q+HqpUtVcJCaFxbkxr3ibSXHgYRgLmWX+QKBgQDckwmhc5IiqWLKrJX8\n"
-"H9W8dAIpOggZa2NOBFCnmxoHFBbLSgnu0On0tZ/4YAaqhqCxpuctLpmEDcqlzSmZ\n"
-"RWdNqcDntTVZOwHHK2JY3xJWo4izrRrk9V9qav0uHQO+6q0aWfHoRSt7alHSp52J\n"
-"vg6A5TASrhE48MFJyuAiCriaOQKBgQC+9SseEw0rwXuHWLkfV/5RxCKNKDcTmrbs\n"
-"JGC9pG9virI3LkTt4SakmScmVSm6yHeh4V9aOcgtf4Z8xbrfmlGuXolb1p1OlbUP\n"
-"NPTzvxvgCHOllpoXKw2d9MWRbNLX2Qpn2GH8UW9x45phd+3kwTHmUE6V0lk1y08O\n"
-"ewNDlchr1QKBgCrT7fnIS+apBwKdUh37PG/0AntoxivRWx3J3rM8fWhEcUyVmqoh\n"
-"LFwUa/Q5CPJRY6A67QYr1yj52JAq7tnQzQcaX9ddqvchau32MYlZ/uCNrjxc7yzn\n"
-"q9go3/H1NkX6oRPNxRe5XoD/GtYRL5iQK5bBaX0nCTcKIC2o064ocMGZAoGBAKxB\n"
-"315m0zfIdtV2PLDAoONDqeNqBp0BsMc+XaJVJk0ZcYCDlZx8wW4z1fQnWNhspDZ8\n"
-"Zpaujxwz8K63c8bnn41LLF+TLx5HwCfynpEOsWecWC5kt6X0qXj26A4ye9RIrrFU\n"
-"qbeCAqVbKtWH6Sq0+H2JrgpK0TzMpQksAJrEECLtAoGABTnGLmknapXdcpNQ5kE4\n"
-"/ERgxt82Whdn3IpkUgo+yMjuc1sEDFOHA5RuDbxRL065RFn69A3rx1pmHsnAu40H\n"
-"zUr9rbG84w2uyuhIAwGg16XAlM/c9jFwVJs8BmO4FPvE4aAWcwyyj4LLSFiSGaC7\n"
-"StRcLwo3dajDEOLjK8RqE9U=\n"
-"-----END PRIVATE KEY-----\n";
+    *out_cert_pem = NULL;
+    *out_key_pem = NULL;
+
+    /* Generate 2048-bit RSA key */
+    pkey = EVP_RSA_gen(2048);
+    if (!pkey) goto cleanup;
+
+    /* Create self-signed X509 certificate */
+    x509 = X509_new();
+    if (!x509) goto cleanup;
+
+    ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
+    X509_gmtime_adj(X509_getm_notBefore(x509), 0);
+    X509_gmtime_adj(X509_getm_notAfter(x509), 3650L * 24 * 3600);
+    X509_set_pubkey(x509, pkey);
+
+    name = X509_get_subject_name(x509);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                               (const unsigned char *)"mytt.local", -1, -1, 0);
+    X509_set_issuer_name(x509, name);
+
+    /* Add Subject Alternative Names: DNS:mytt.local, DNS:mytt */
+    GENERAL_NAMES *san_names = sk_GENERAL_NAME_new_null();
+    if (!san_names) goto cleanup;
+
+    const char *dns_names[] = {"mytt.local", "mytt"};
+    for (int i = 0; i < 2; i++) {
+        GENERAL_NAME *gen = GENERAL_NAME_new();
+        if (!gen) { sk_GENERAL_NAME_pop_free(san_names, GENERAL_NAME_free); goto cleanup; }
+        ASN1_IA5STRING *ia5 = ASN1_IA5STRING_new();
+        if (!ia5) { GENERAL_NAME_free(gen); sk_GENERAL_NAME_pop_free(san_names, GENERAL_NAME_free); goto cleanup; }
+        ASN1_STRING_set(ia5, dns_names[i], (int)strlen(dns_names[i]));
+        GENERAL_NAME_set0_value(gen, GEN_DNS, ia5);
+        sk_GENERAL_NAME_push(san_names, gen);
+    }
+    X509_add1_ext_i2d(x509, NID_subject_alt_name, san_names, 0, 0);
+    sk_GENERAL_NAME_pop_free(san_names, GENERAL_NAME_free);
+
+    if (!X509_sign(x509, pkey, EVP_sha256())) goto cleanup;
+
+    /* Write private key to PEM string */
+    bio = BIO_new(BIO_s_mem());
+    if (!bio) goto cleanup;
+    if (!PEM_write_bio_PrivateKey(bio, pkey, NULL, NULL, 0, NULL, NULL)) goto cleanup;
+    pem_len = BIO_get_mem_data(bio, &pem_data);
+    *out_key_pem = malloc((size_t)pem_len + 1);
+    if (!*out_key_pem) goto cleanup;
+    memcpy(*out_key_pem, pem_data, (size_t)pem_len);
+    (*out_key_pem)[pem_len] = '\0';
+    BIO_free(bio);
+
+    /* Write certificate to PEM string */
+    bio = BIO_new(BIO_s_mem());
+    if (!bio) goto cleanup;
+    if (!PEM_write_bio_X509(bio, x509)) goto cleanup;
+    pem_len = BIO_get_mem_data(bio, &pem_data);
+    *out_cert_pem = malloc((size_t)pem_len + 1);
+    if (!*out_cert_pem) goto cleanup;
+    memcpy(*out_cert_pem, pem_data, (size_t)pem_len);
+    (*out_cert_pem)[pem_len] = '\0';
+
+    ret = 0;
+
+cleanup:
+    if (ret != 0) {
+        free(*out_cert_pem); *out_cert_pem = NULL;
+        free(*out_key_pem);  *out_key_pem = NULL;
+    }
+    BIO_free(bio);
+    X509_free(x509);
+    EVP_PKEY_free(pkey);
+    return ret;
+}
 
 static struct mg_str s_tls_cert = {0};
 static struct mg_str s_tls_key  = {0};
@@ -758,12 +797,19 @@ int main(int argc, char **argv) {
 
     ensure_upload_dir();
 
-    /* Use embedded certs, or load from disk if files exist */
+    /* Try loading certs from disk, otherwise generate ephemeral ones */
     s_tls_cert = load_file("cert.pem");
     s_tls_key  = load_file("key.pem");
     if (!s_tls_cert.len || !s_tls_key.len) {
-        s_tls_cert = mg_str(s_tls_cert_pem);
-        s_tls_key  = mg_str(s_tls_key_pem);
+        char *gen_cert = NULL, *gen_key = NULL;
+        if (generate_tls_keypair(&gen_cert, &gen_key) == 0) {
+            s_tls_cert = mg_str(gen_cert);
+            s_tls_key  = mg_str(gen_key);
+            printf("[*] Generated ephemeral TLS certificate (CN=mytt.local)\n");
+        } else {
+            fprintf(stderr, "[-] Failed to generate TLS keypair\n");
+            return 1;
+        }
     }
 
     struct mg_mgr mgr; mg_mgr_init(&mgr);
