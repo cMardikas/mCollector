@@ -44,8 +44,16 @@ static int generate_tls_keypair(char **out_cert_pem, char **out_key_pem) {
     *out_cert_pem = NULL;
     *out_key_pem = NULL;
 
-    /* Generate 2048-bit RSA key */
-    pkey = EVP_RSA_gen(2048);
+    /* Generate 2048-bit RSA key (compatible with OpenSSL 1.1.x and 3.x) */
+    EVP_PKEY_CTX *kctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+    if (!kctx) goto cleanup;
+    if (EVP_PKEY_keygen_init(kctx) <= 0 ||
+        EVP_PKEY_CTX_set_rsa_keygen_bits(kctx, 2048) <= 0 ||
+        EVP_PKEY_keygen(kctx, &pkey) <= 0) {
+        EVP_PKEY_CTX_free(kctx);
+        goto cleanup;
+    }
+    EVP_PKEY_CTX_free(kctx);
     if (!pkey) goto cleanup;
 
     /* Create self-signed X509 certificate */
