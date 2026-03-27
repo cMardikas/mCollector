@@ -418,7 +418,7 @@ if ($test) {
 
 	foreach($guid in $guids) {
 		$guidSubKey = $subKey.OpenSubKey($guid);
-		$tenantId = $guidSubKey.GetValue("UserEmail");
+		$userEmail = $guidSubKey.GetValue("UserEmail");
 	}
 
 return $userEmail
