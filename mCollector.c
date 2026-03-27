@@ -25,7 +25,7 @@
 #include <openssl/bio.h>
 #include <openssl/bn.h>
 
-#define MCOLLECTOR_VERSION "1.3.0"
+#define MCOLLECTOR_VERSION "1.3.1"
 #define MCOLLECTOR_BUILD   __DATE__ " " __TIME__
 #define HASHES_FILE        "uploads/hashes.txt"
 #define NR_HOSTNAME        "mytt"
