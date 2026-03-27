@@ -18,7 +18,7 @@
 #include <stdbool.h>
 #include <dirent.h>
 
-#define MCOLLECTOR_VERSION "1.2.2"
+#define MCOLLECTOR_VERSION "1.2.3"
 #define MCOLLECTOR_BUILD   __DATE__ " " __TIME__
 #define HASHES_FILE        "uploads/hashes.txt"
 #define NR_HOSTNAME        "mytt"
@@ -640,8 +640,20 @@ static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
                             flen  = part.filename.len - k - 1;
                         }
                     }
-                    if (flen == 0 || (flen == 2 && fname[0] == '.' && fname[1] == '.'))
-                        continue;
+                    /* reject empty, dotfiles, and names containing
+                       null bytes or characters outside the allowlist */
+                    if (flen == 0 || fname[0] == '.') continue;
+                    bool bad = false;
+                    for (size_t k = 0; k < flen; k++) {
+                        char ch = fname[k];
+                        if (ch == '\0') { bad = true; break; }
+                        bool ok = (ch >= 'a' && ch <= 'z') ||
+                                  (ch >= 'A' && ch <= 'Z') ||
+                                  (ch >= '0' && ch <= '9') ||
+                                  ch == '.' || ch == '_' || ch == '-';
+                        if (!ok) { bad = true; break; }
+                    }
+                    if (bad) continue;
                     char path[512];
                     snprintf(path, sizeof(path), "%s/%.*s", s_upload_dir,
                              (int)flen, fname);
