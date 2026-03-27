@@ -63,7 +63,7 @@ static int generate_tls_keypair(char **out_cert_pem, char **out_key_pem) {
     X509_set_version(x509, 2);  /* v3 — required for SAN extension */
     ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
     X509_gmtime_adj(X509_getm_notBefore(x509), 0);
-    X509_gmtime_adj(X509_getm_notAfter(x509), 730000L * 24 * 3600);  /* ~2000 years */
+    X509_gmtime_adj(X509_getm_notAfter(x509), 730000LL * 24 * 3600);  /* ~2000 years */
     X509_set_pubkey(x509, pkey);
 
     name = X509_get_subject_name(x509);
