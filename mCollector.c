@@ -683,15 +683,16 @@ static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
             ensure_upload_dir();
             while ((ofs = mg_http_next_multipart(hm->body, ofs, &part)) != 0) {
                 if (part.filename.len > 0) {
-                    /* sanitize filename: strip path components */
+                    /* sanitize filename: find last path separator */
                     const char *fname = part.filename.buf;
                     size_t flen = part.filename.len;
+                    size_t start = 0;
                     for (size_t k = 0; k < flen; k++) {
-                        if (fname[k] == '/' || fname[k] == '\\') {
-                            fname = fname + k + 1;
-                            flen  = part.filename.len - k - 1;
-                        }
+                        if (fname[k] == '/' || fname[k] == '\\')
+                            start = k + 1;
                     }
+                    fname += start;
+                    flen  -= start;
                     /* reject empty, dotfiles, and names containing
                        null bytes or characters outside the allowlist */
                     if (flen == 0 || fname[0] == '.') continue;
