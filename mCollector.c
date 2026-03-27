@@ -352,16 +352,20 @@ static void parse_ntlmssp_auth(const uint8_t *sec_blob, size_t sec_len,
     }
     if (!p || rl32(p+8) != 3) return;
 
-    size_t   avail   = sec_len - (size_t)(p - sec_blob);
-    uint16_t nt_len  = rl16(p+20); uint32_t nt_off  = rl32(p+24);
-    uint16_t dom_len = rl16(p+28); uint32_t dom_off  = rl32(p+32);
-    uint16_t usr_len = rl16(p+36); uint32_t usr_off  = rl32(p+40);
-    uint16_t ws_len  = rl16(p+44); uint32_t ws_off   = rl32(p+48);
+    size_t avail = sec_len - (size_t)(p - sec_blob);
+    if (avail < 52) return;  /* minimum NTLMSSP_AUTH header size */
 
-    if ((uint64_t)nt_off+nt_len   > avail ||
-        (uint64_t)usr_off+usr_len > avail ||
-        (uint64_t)dom_off+dom_len > avail ||
-        (uint64_t)ws_off+ws_len   > avail ||
+    uint16_t nt_len  = rl16(p+20); uint32_t nt_off  = rl32(p+24);
+    uint16_t dom_len = rl16(p+28); uint32_t dom_off = rl32(p+32);
+    uint16_t usr_len = rl16(p+36); uint32_t usr_off = rl32(p+40);
+    uint16_t ws_len  = rl16(p+44); uint32_t ws_off  = rl32(p+48);
+
+    /* Overflow-safe bounds checks: verify offset+length doesn't
+       exceed available data using subtraction instead of addition */
+    if (nt_off  > avail || nt_len  > avail - nt_off  ||
+        usr_off > avail || usr_len > avail - usr_off ||
+        dom_off > avail || dom_len > avail - dom_off ||
+        ws_off  > avail || ws_len  > avail - ws_off  ||
         nt_len < 24) return;
 
     char username[256]="", domain[256]="", workstation[256]="";
@@ -537,7 +541,7 @@ static void smb2_parse_auth(const uint8_t *smb2, size_t smb2_len,
     const uint8_t *body = smb2 + 64;
     uint16_t sec_off = rl16(body+12);
     uint16_t sec_len = rl16(body+14);
-    if ((size_t)sec_off + (size_t)sec_len > smb2_len) return;
+    if (sec_off > smb2_len || sec_len > smb2_len - sec_off) return;
     parse_ntlmssp_auth(smb2 + sec_off, sec_len, challenge);
 }
 
