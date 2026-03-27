@@ -276,6 +276,7 @@ static size_t spnego_neg_token_resp(uint8_t *out, size_t outsz,
     pos += der_len(tmp+pos, inner_len);
     tmp[pos++] = 0x04;
     pos += der_len(tmp+pos, ntlm_len);
+    if (pos + ntlm_len > sizeof(tmp)) return 0;
     memcpy(tmp+pos, ntlm, ntlm_len); pos += ntlm_len;
 
     size_t seq_content = pos;
@@ -433,7 +434,8 @@ static void smb2_build_hdr(uint8_t *hdr,
 static size_t smb2_nego_response(uint8_t *buf, size_t bufsz,
                                   const uint8_t *client_smb2,
                                   uint16_t dialect) {
-    (void)bufsz;
+    /* max: 4 + 64 + 64 + SPNEGO_INIT_LEN(74) = 206 */
+    if (bufsz < 4 + 64 + 64 + SPNEGO_INIT_LEN) return 0;
     size_t pos = 4;
     uint8_t hdr[64];
     smb2_build_hdr(hdr, 0x0000, 0x00000000,
@@ -485,7 +487,7 @@ static size_t smb2_session_challenge(uint8_t *buf, size_t bufsz,
                                       const uint8_t *smb2,
                                       const uint8_t *srv_challenge,
                                       uint64_t *session_id_out) {
-    (void)bufsz;
+    if (bufsz < 4 + 64 + 8 + 640) return 0;  /* hdr + body + max spnego */
     uint64_t mid = smb2_get_u64(smb2, 24);
     uint64_t sid = smb2_get_u64(smb2, 40);
     if (!sid) sid = 0x0000000400000001ULL;
@@ -519,7 +521,7 @@ static size_t smb2_session_challenge(uint8_t *buf, size_t bufsz,
 static size_t smb2_session_failure(uint8_t *buf, size_t bufsz,
                                     const uint8_t *smb2,
                                     uint64_t session_id) {
-    (void)bufsz;
+    if (bufsz < 4 + 64 + 9) return 0;  /* NB header + SMB2 hdr + body */
     size_t pos = 4;
     uint8_t hdr[64];
     smb2_build_hdr(hdr, 0x0001, 0xC0000022,

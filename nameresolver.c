@@ -337,6 +337,8 @@ nr_llmnr_respond(int sock, const struct sockaddr *from, socklen_t flen,
     size_t nl = nr_dns_encode(qname, r + p, sizeof(r) - p);
     if (nl == 0) return;
     p += nl;
+    /* need: QTYPE(2) + QCLASS(2) + A answer(16) + AAAA answer(28) = 48 */
+    if (p + 48 > sizeof(r)) return;
     r[p++] = (qtype >> 8); r[p++] = qtype & 0xFF;
     r[p++] = (qclass >> 8); r[p++] = qclass & 0xFF;
 
