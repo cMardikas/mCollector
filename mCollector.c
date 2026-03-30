@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <stdbool.h>
 #include <dirent.h>
+#include <unistd.h>
 
 #include <openssl/evp.h>
 #include <openssl/x509.h>
@@ -786,6 +787,18 @@ static void clear_uploads(void) {
 }
 
 int main(int argc, char **argv) {
+    /* chdir to binary's directory so relative paths (index.html,
+       uploads/, cert.pem) resolve correctly regardless of cwd */
+    {
+        char exe[4096];
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n > 0) {
+            exe[n] = '\0';
+            char *slash = strrchr(exe, '/');
+            if (slash) { *slash = '\0'; chdir(exe); }
+        }
+    }
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--clear") == 0 || strcmp(argv[i], "-c") == 0) {
             ensure_upload_dir();
