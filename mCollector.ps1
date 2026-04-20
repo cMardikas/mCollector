@@ -1,5 +1,5 @@
 #Small script to collect some windows data.
-#Version 1.3.2
+#Version 1.3.3
 
 try{
 	#Allow running unsigned scripts as current user
@@ -151,21 +151,27 @@ public class TrustAllCerts : ICertificatePolicy {
             [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCerts
             [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
 
-            # Build multipart body from in-memory JSON
-            $enc = [System.Text.Encoding]::UTF8
-            $fileContent = $enc.GetBytes($jsonString)
+            # Build multipart body from in-memory JSON.
+            # NB: do NOT mix StreamWriter with direct MemoryStream writes.
+            # StreamWriter buffers chars internally and only flushes the final
+            # bytes on Close(), which ran AFTER ToArray() already snapshotted
+            # the buffer -- so Content-Length was short and the tail of the
+            # body (including the JSON closing "}") got truncated on the wire.
+            $enc = New-Object System.Text.UTF8Encoding($false)   # no BOM
             $boundary = [System.Guid]::NewGuid().ToString()
+            $header  = "--$boundary`r`n" +
+                       "Content-Disposition: form-data; name=`"file`"; filename=`"$fileName`"`r`n" +
+                       "Content-Type: application/json; charset=utf-8`r`n`r`n"
+            $trailer = "`r`n--$boundary--`r`n"
+            $headerBytes  = $enc.GetBytes($header)
+            $fileContent  = $enc.GetBytes($jsonString)
+            $trailerBytes = $enc.GetBytes($trailer)
             $ms = New-Object System.IO.MemoryStream
-            $sw = New-Object System.IO.StreamWriter($ms, $enc)
-            $sw.Write("--$boundary`r`n")
-            $sw.Write("Content-Disposition: form-data; name=`"file`"; filename=`"$fileName`"`r`n")
-            $sw.Write("Content-Type: application/octet-stream`r`n`r`n")
-            $sw.Flush()
-            $ms.Write($fileContent, 0, $fileContent.Length)
-            $sw.Write("`r`n--$boundary--`r`n")
-            $sw.Flush()
+            $ms.Write($headerBytes,  0, $headerBytes.Length)
+            $ms.Write($fileContent,  0, $fileContent.Length)
+            $ms.Write($trailerBytes, 0, $trailerBytes.Length)
             $bodyBytes = $ms.ToArray()
-            $sw.Close()
+            $ms.Close()
 
             # Send via HttpWebRequest
             $req = [System.Net.HttpWebRequest]::Create($uploadUrl)
