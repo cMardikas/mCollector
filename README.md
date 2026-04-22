@@ -75,7 +75,7 @@ On systems with `systemd-resolved`, LLMNR packets on port 5355 may be intercepte
   ╚═╝   ╚═╝  ╚═════╝ ╚═════╝ ╚══════╝╚══════╝╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝
                                     S E R V E R
 
-  version   : 1.3.9
+  version   : 1.4.0
   build     : Mar 26 2026 12:00:00
   hashes    : uploads/hashes.txt                      hashcat -m 5600
   loaded    : 1 previously captured user(s)
@@ -219,7 +219,11 @@ Output: `uploads/koondraport_YYYY-MM-DD_HH-MM-SS.html` — self-contained dark-t
 - Queries [NVD v2 API](https://nvd.nist.gov/developers/vulnerabilities) for known CVEs per unique `vendor:product:version` combination
 - Results cached 24 h at `.cve_cache.json` (next to the script) — rerunning is ~100× faster
 - [Request a free NVD API key](https://nvd.nist.gov/developers/request-an-api-key) for 50 req/30 s rate-limit (without key: 5 req/30 s)
-- Vendor/product mapping handled via an internal whitelist (Adobe, Chrome, LibreOffice, Oracle JDK, Foxit, Microsoft Teams, FortiClient, etc.)
+- **Vendor/product mapping** (v1.4.0): two-pass resolution
+  1. Internal whitelist — curated high-confidence mappings (Adobe, Chrome, LibreOffice, Oracle JDK, Foxit, Microsoft Teams, FortiClient, Office, Firefox, 7-Zip, etc.)
+  2. **Automatic CPE lookup** — falls back to the [NVD CPE Dictionary API](https://services.nvd.nist.gov/rest/json/cpes/2.0) to resolve unknown software by keyword search, scored against product/version/title tokens to pick the closest match
+- Noise filtering via stopword list (runtimes, redistributables, driver bundles, KB hotfixes, localisation packs) so system plumbing isn’t queried
+- CPE resolution results cached 30 days at `.cpe_resolution_cache.json`
 
 ### Input format
 

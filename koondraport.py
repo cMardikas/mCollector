@@ -19,7 +19,7 @@ import urllib.request
 from datetime import datetime, timezone
 from html import escape as h
 
-__version__ = '1.3.9'
+__version__ = '1.4.0'
 
 UPLOAD_DIR = 'uploads'
 OUTPUT_PREFIX = 'koondraport'
@@ -2182,7 +2182,39 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CVE_CACHE_FILE = os.path.join(_SCRIPT_DIR, '.cve_cache.json')
 CVE_CACHE_TTL_SEC = 24 * 3600
 NVD_API_URL = 'https://services.nvd.nist.gov/rest/json/cves/2.0'
+NVD_CPE_API_URL = 'https://services.nvd.nist.gov/rest/json/cpes/2.0'
 NVD_USER_AGENT = f'koondraport/{__version__}'
+
+# CPE resolution cache (separate from CVE cache; CPE mappings are very stable,
+# so TTL is 30 days). Maps normalised-name -> (vendor, product) or None.
+CPE_RESOLUTION_CACHE_FILE = os.path.join(_SCRIPT_DIR, '.cpe_resolution_cache.json')
+CPE_RESOLUTION_TTL_SEC = 30 * 24 * 3600
+
+# Software names we NEVER try to resolve — OS components, localisation packs,
+# runtime redistributables, update helpers. These clutter results without
+# producing useful CVE matches.
+CPE_RESOLUTION_STOPWORDS = [
+    r'\bmui\b',                              # language packs
+    r'\bproofing\b',                         # Office proofing tools
+    r'\bõigekeelsusriistad\b',                # Estonian proofing
+    r'\bredistributable\b',                  # VC++ redist etc.
+    r'\bruntime\b.*\b(component|library)\b', # runtime libs
+    r'\bupdate\s+(helper|health|manager)\b', # update plumbing
+    r'\bkb\d{5,}\b',                         # Windows KB updates
+    r'^windows\s+(sdk|driver|feature|app)',  # Windows internal
+    r'^microsoft\s+\.net\b',                 # .NET framework pieces
+    r'^microsoft\s+visual\s+c\+\+',           # VC++ redist
+    r'^vcredist',
+    r'\bsetup\s+metadata\b',                 # installer metadata
+    r'\bclick-to-run\b.*\bcomponent\b',      # Office C2R plumbing
+    r'\bclick-to-run\b.*\blicensing\b',
+    r'\b(driver|drivers)$',                  # bare driver entries
+    r'^intel\(r\)\s+(chipset|management|trusted|dynamic|graphics\s+driver|network|rapid|serial|smart|system)',
+    r'^realtek\b.*driver',
+    r'^nvidia\s+(physx|hd\s+audio|3d\s+vision|geforce\s+experience)',
+    r'^amd\s+(catalyst|display|software\s+installer)',
+    r'^(hp|dell|lenovo|asus|acer)\s+',        # vendor bloatware
+]
 
 
 def _load_cve_cache():
@@ -2235,9 +2267,10 @@ def map_to_cpe(display_name, version):
     return None
 
 
-def _nvd_request(params, api_key, attempt=1):
+def _nvd_request(params, api_key, attempt=1, base_url=None):
+    base = base_url or NVD_API_URL
     qs = urllib.parse.urlencode(params)
-    url = f'{NVD_API_URL}?{qs}'
+    url = f'{base}?{qs}'
     headers = {'User-Agent': NVD_USER_AGENT}
     if api_key:
         headers['apiKey'] = api_key
@@ -2249,8 +2282,195 @@ def _nvd_request(params, api_key, attempt=1):
         # 403/429 => backoff and retry once
         if e.code in (403, 429, 503) and attempt <= 2:
             time.sleep(6)
-            return _nvd_request(params, api_key, attempt + 1)
+            return _nvd_request(params, api_key, attempt + 1, base_url=base)
         raise
+
+
+# --- CPE auto-resolution (NVD CPE Dictionary) -----------------------------
+
+def _load_cpe_resolution_cache():
+    if not os.path.exists(CPE_RESOLUTION_CACHE_FILE):
+        return {}
+    try:
+        with open(CPE_RESOLUTION_CACHE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_cpe_resolution_cache(cache):
+    try:
+        tmp = CPE_RESOLUTION_CACHE_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CPE_RESOLUTION_CACHE_FILE)
+    except Exception as e:
+        print(f"  [CPE cache save failed: {e}]", file=sys.stderr)
+
+
+def _is_stopword_match(name_lc):
+    """Return True if this software name should be skipped entirely."""
+    for pat in CPE_RESOLUTION_STOPWORDS:
+        if re.search(pat, name_lc, re.IGNORECASE):
+            return True
+    return False
+
+
+def _normalize_for_search(display_name):
+    """Clean software name for NVD keywordSearch.
+    Strips architecture tags, localisation, trailing versions/editions,
+    and common installer suffixes."""
+    n = display_name.lower()
+    # remove bracketed stuff e.g. "(64-bit)", "(x64)", "(en-us)"
+    n = re.sub(r'\([^)]*\)', ' ', n)
+    # remove arch/encoding tokens
+    n = re.sub(r'\b(x86|x64|amd64|arm64|32-bit|64-bit|ia32|win32|win64)\b', ' ', n)
+    # remove trailing version-like substrings at the end (2 or more dot-separated digits)
+    n = re.sub(r'\b\d+(?:\.\d+){1,}[\w.-]*', ' ', n)
+    # remove common edition words that hurt keywordSearch accuracy
+    n = re.sub(r'\b(professional plus|professional|enterprise|standard|home|ultimate|premium|lite|free|edition|setup|installer|uninstaller|client|manager|tools?)\b', ' ', n)
+    # language tokens
+    n = re.sub(r'\b(english|estonian|eesti|russian|german|french|spanish|deutsch|fran\u00e7ais|espa\u00f1ol|en-us|et-ee|ru-ru)\b', ' ', n)
+    # collapse whitespace and punctuation
+    n = re.sub(r'[^\w\s\-\+\.]', ' ', n)
+    n = re.sub(r'\s+', ' ', n).strip()
+    return n
+
+
+def _score_cpe_match(cpe_title, cpe_name, original_name_lc):
+    """Heuristic score: how well does this CPE match the original software name?
+    Higher = better. Requires at least 2 significant tokens overlap.
+
+    Also PENALISES matches where CPE includes "foreign" tokens not in the original
+    (e.g. CPE 'office_2013_rt' has 'rt' which isn't in 'Microsoft Office Professional
+    Plus 2013' — this avoids picking unrelated variants like RT/Messenger/Installer).
+    """
+    title_lc = (cpe_title or '').lower()
+    cpe_lc = (cpe_name or '').lower()
+    orig_tokens = set(re.findall(r'[a-z0-9]+', original_name_lc))
+    orig_sig = {t for t in orig_tokens if len(t) >= 3 and t not in {
+        'the', 'and', 'for', 'inc', 'ltd', 'corp', 'software', 'application', 'app',
+        'microsoft', 'apple', 'google', 'adobe'  # vendors that match everything
+    }}
+    if not orig_sig:
+        return 0
+    # CPE fields: cpe:2.3:a:vendor:product:version:...
+    parts = cpe_lc.split(':')
+    product = parts[4] if len(parts) > 4 else ''
+    version_field = parts[5] if len(parts) > 5 else ''
+    # Match tokens against product AND version (important because e.g.
+    # 'microsoft:office:2013:*' keeps '2013' in version field, not product)
+    product_tokens = set(re.findall(r'[a-z0-9]+', product))
+    version_tokens = set(re.findall(r'[a-z0-9]+', version_field))
+    title_tokens = set(re.findall(r'[a-z0-9]+', title_lc))
+    # Significant overlap
+    overlap_product = len(orig_sig & product_tokens)
+    overlap_version = len(orig_sig & version_tokens)
+    overlap_title = len(orig_sig & title_tokens)
+    # PENALTY: tokens in product that are NOT in original (e.g. 'rt', 'messenger',
+    # 'analyzer', 'studio') — these indicate a different variant/edition
+    product_sig = {t for t in product_tokens if len(t) >= 3}
+    extra_in_product = len(product_sig - orig_tokens)
+    # :a: bonus (application, not OS/hardware)
+    bonus = 5 if ':a:' in cpe_lc else 0
+    # Prefer generic CPE (no version suffix means it applies to all versions)
+    if version_field in ('-', '*'):
+        bonus += 2
+    # BIG BONUS: "pure base product" — product is a single token that appears
+    # in the original name (e.g. product="office" for "Microsoft Office 2013").
+    # This prefers microsoft:office:2013 over microsoft:office_2013_rt because
+    # the latter bundles the year+variant into the product field.
+    if len(product_tokens) == 1:
+        only = next(iter(product_tokens))
+        if len(only) >= 3 and only in orig_tokens:
+            bonus += 10
+    # EXTRA BONUS: version field token matches a token in the original name
+    # (e.g. version="2013" and original has "2013"). Strong signal for
+    # year-based editions like Office 2013, Visual Studio 2019.
+    if overlap_version >= 1 and version_field not in ('-', '*'):
+        bonus += 3
+    # PENALTY for extra tokens in product — increase weight to suppress
+    # variant products (office_2013_rt, windows_live_messenger) more strongly.
+    return (overlap_product * 3
+            + overlap_version * 4
+            + overlap_title * 2
+            - extra_in_product * 7
+            + bonus)
+
+
+def resolve_cpe_via_nvd(display_name, api_key, cpe_cache):
+    """Look up a (vendor, product) pair for an arbitrary software name
+    by querying the NVD CPE Dictionary. Returns (vendor, product) or None.
+    Uses cpe_cache (dict) to avoid repeat queries. Caches both positive and
+    negative results so unrecognised software isn't re-queried."""
+    name_lc = display_name.lower().strip()
+    if not name_lc:
+        return None
+    if _is_stopword_match(name_lc):
+        return None
+    cache_key = name_lc
+    now = int(time.time())
+    cached = cpe_cache.get(cache_key)
+    if cached and cached.get('ts', 0) + CPE_RESOLUTION_TTL_SEC > now:
+        mapping = cached.get('mapping')
+        return tuple(mapping) if mapping else None
+
+    query = _normalize_for_search(display_name)
+    if not query or len(query) < 3:
+        cpe_cache[cache_key] = {'ts': now, 'mapping': None}
+        return None
+
+    params = {'keywordSearch': query, 'resultsPerPage': 10}
+    try:
+        data = _nvd_request(params, api_key, base_url=NVD_CPE_API_URL)
+    except Exception as e:
+        print(f"  [CPE lookup failed for '{display_name}': {e}]", file=sys.stderr)
+        return None
+
+    # Significant tokens from original name (len>=4 excludes short words)
+    orig_tokens = set(re.findall(r'[a-z0-9]+', name_lc))
+    orig_sig = {t for t in orig_tokens if len(t) >= 4 and t not in {
+        'the', 'and', 'for', 'inc', 'ltd', 'corp', 'software', 'application', 'client', 'tools'
+    }}
+
+    best = None
+    best_score = 0
+    best_overlap = 0
+    for p in data.get('products', []) or []:
+        cpe = p.get('cpe', {}) or {}
+        cpe_name = cpe.get('cpeName', '')
+        if not cpe_name or ':a:' not in cpe_name:
+            continue
+        titles = [t.get('title', '') for t in cpe.get('titles', [])
+                  if t.get('lang') == 'en']
+        title = titles[0] if titles else ''
+        score = _score_cpe_match(title, cpe_name, name_lc)
+        # count significant overlap with combined title+cpe tokens
+        combined_tokens = set(re.findall(r'[a-z0-9]+', title.lower() + ' ' + cpe_name.lower()))
+        overlap = len(orig_sig & combined_tokens)
+        if score > best_score:
+            best_score = score
+            best = cpe_name
+            best_overlap = overlap
+
+    # Require score >= 12 AND at least 2 significant tokens overlapping to avoid false positives
+    if best and best_score >= 12 and best_overlap >= 2:
+        parts = best.split(':')
+        # cpe:2.3:a:<vendor>:<product>:<version>:...
+        if len(parts) >= 5:
+            vendor = parts[3]
+            product = parts[4]
+            cpe_cache[cache_key] = {
+                'ts': now,
+                'mapping': [vendor, product],
+                'score': best_score,
+                'matched_cpe': best,
+            }
+            return (vendor, product)
+
+    cpe_cache[cache_key] = {'ts': now, 'mapping': None}
+    return None
 
 
 def _extract_cvss(cve):
@@ -2323,21 +2543,72 @@ def scan_fleet_for_cves(hosts, matrix, api_key):
         host_cve_index: {host_name: [{package, version, cve, score, severity}]}
     """
     cache = _load_cve_cache()
-    # (vendor, product, version) -> list of hosts running it
+    cpe_cache = _load_cpe_resolution_cache()
+
+    # Pass 1: whitelist-based mapping (fast, deterministic)
+    # (vendor, product, version) -> {display_name, hosts}
     triples = {}
+    # software names that didn't match the whitelist — try auto-resolve
+    unmatched = {}  # display_name -> {version: [hosts]}
     for entry in matrix:
         for host_name, info in entry['per_host'].items():
-            mapping = map_to_cpe(entry['display_name'], info.get('version'))
-            if not mapping:
-                continue
-            triples.setdefault(mapping, {
-                'display_name': entry['display_name'],
-                'hosts': [],
-            })
-            triples[mapping]['hosts'].append(host_name)
+            version = info.get('version')
+            mapping = map_to_cpe(entry['display_name'], version)
+            if mapping:
+                triples.setdefault(mapping, {
+                    'display_name': entry['display_name'],
+                    'hosts': [],
+                })
+                triples[mapping]['hosts'].append(host_name)
+            else:
+                v = _clean_version_for_cpe(version)
+                if not v:
+                    continue
+                unmatched.setdefault(entry['display_name'], {}) \
+                         .setdefault(v, []).append(host_name)
+
+    # Pass 2: auto-resolve CPE for remaining unique software names via NVD CPE Dictionary
+    cpe_resolved = 0
+    cpe_cached_neg = 0
+    cpe_stopword = 0
+    cpe_api_calls = 0
+    cpe_last_was_api = False
+    cpe_delay = 0.7 if api_key else 6.5
+    for display_name, versions in sorted(unmatched.items()):
+        name_lc = display_name.lower().strip()
+        if _is_stopword_match(name_lc):
+            cpe_stopword += 1
+            continue
+        cached = cpe_cache.get(name_lc)
+        is_cached = cached and cached.get('ts', 0) + CPE_RESOLUTION_TTL_SEC > int(time.time())
+        if not is_cached:
+            if cpe_last_was_api:
+                time.sleep(cpe_delay)
+            cpe_api_calls += 1
+            cpe_last_was_api = True
+        else:
+            cpe_last_was_api = False
+        mapping = resolve_cpe_via_nvd(display_name, api_key, cpe_cache)
+        if mapping:
+            vendor, product = mapping
+            cpe_resolved += 1
+            for version, host_names in versions.items():
+                key = (vendor, product, version)
+                triples.setdefault(key, {
+                    'display_name': display_name,
+                    'hosts': [],
+                })
+                triples[key]['hosts'].extend(host_names)
+        else:
+            cpe_cached_neg += 1
+
+    _save_cpe_resolution_cache(cpe_cache)
+    if cpe_api_calls or cpe_resolved or cpe_stopword:
+        print(f"  [CPE auto-resolve: {cpe_resolved} mapped, {cpe_cached_neg} unknown, "
+              f"{cpe_stopword} filtered, {cpe_api_calls} NVD lookups]")
 
     if not triples:
-        print("  [CVE scan: no packages matched whitelist]")
+        print("  [CVE scan: no packages matched]")
         return [], {}
 
     print(f"  [CVE scan: {len(triples)} unique package+version against NVD]")
