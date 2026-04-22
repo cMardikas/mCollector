@@ -19,7 +19,7 @@ import urllib.request
 from datetime import datetime, timezone
 from html import escape as h
 
-__version__ = '1.3.7'
+__version__ = '1.3.8'
 
 UPLOAD_DIR = 'uploads'
 OUTPUT_PREFIX = 'koondraport'
@@ -135,6 +135,8 @@ def load_hosts(upload_dir):
     for filename in sorted(os.listdir(upload_dir)):
         if not filename.endswith('.json'):
             continue
+        if filename.startswith('.'):
+            continue  # skip caches / hidden files (e.g. .cve_cache.json)
         with open(os.path.join(upload_dir, filename), 'r',
                   encoding='utf-8', errors='ignore') as f:
             content = f.read()
@@ -423,9 +425,9 @@ def compute_security_findings(hosts, matrix):
             'hosts': defender_off,
         })
 
-    # 2. BitLocker missing (high)
+    # 2. BitLocker missing (high) — user is rendered separately on every card
     bitlocker_off = [
-        {'name': h0['name'], 'detail': 'C: draiv krüpteerimata'}
+        {'name': h0['name']}
         for h0 in hosts if not h0['bitlocker']
     ]
     if bitlocker_off:
@@ -437,9 +439,9 @@ def compute_security_findings(hosts, matrix):
             'hosts': bitlocker_off,
         })
 
-    # 3. Active user is local admin (high)
+    # 3. Active user is local admin (high) — user rendered on every card
     admin_users = [
-        {'name': h0['name'], 'detail': f"Kasutaja: {h0['user']}"}
+        {'name': h0['name']}
         for h0 in hosts if h0['metrics']['is_admin_user']
     ]
     if admin_users:
@@ -532,28 +534,7 @@ def compute_security_findings(hosts, matrix):
             'hosts': long_uptime,
         })
 
-    # 8. Version drift summary (info)
-    drift_count = sum(1 for e in matrix if e['status'] == 'drift')
-    if drift_count:
-        affected_hosts = set()
-        for e in matrix:
-            if e['status'] == 'drift':
-                for hn in e.get('lagging_hosts', []):
-                    affected_hosts.add(hn)
-        findings.append({
-            'key': 'version_drift',
-            'title': 'Sama tarkvara eri versioonidel',
-            'severity': 'info',
-            'icon': 'shuffle',
-            'hosts': [
-                {'name': hn, 'detail': ''}
-                for hn in sorted(affected_hosts)
-            ],
-            'summary_count': drift_count,
-            'summary_suffix': 'paketti',
-        })
-
-    # 9. Remote-access / remote-management / tunnel software (medium)
+    # 8. Remote-access / remote-management / tunnel software (medium)
     remote_hosts = []
     for h0 in hosts:
         hits = detect_remote_access(h0)
@@ -577,7 +558,15 @@ def compute_security_findings(hosts, matrix):
             'hosts': remote_hosts,
         })
 
-    findings.sort(key=lambda f: (SEVERITY_ORDER[f['severity']], f['key']))
+    # Sort: pinned cards absolutely first (regardless of severity),
+    # then everything else by severity + alphabetical key.
+    _pin = {'vulnerable_software': 0, 'admin_user': 1, 'bitlocker_off': 2}
+    findings.sort(key=lambda f: (
+        0 if f['key'] in _pin else 1,
+        _pin.get(f['key'], 0),
+        SEVERITY_ORDER[f['severity']],
+        f['key'],
+    ))
     return findings
 
 
@@ -798,6 +787,89 @@ HTML_HEAD = """<!DOCTYPE html>
             display: flex; align-items: center; gap: .75rem; flex-wrap: wrap;
         }
         .sf-summary { display: flex; gap: .4rem; flex-wrap: wrap; }
+
+        /* Info popover next to "Turvaleiud" heading */
+        .sf-info {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 20px; height: 20px;
+            border-radius: 50%;
+            color: var(--text-subtle);
+            cursor: help;
+            margin-left: .35rem;
+            transition: color .12s ease, background .12s ease;
+        }
+        .sf-info:hover, .sf-info:focus { color: var(--text); outline: none; }
+        .sf-info i { font-size: .95rem; line-height: 1; }
+        .sf-info-pop {
+            position: absolute;
+            top: calc(100% + 8px);
+            left: 0;
+            z-index: 50;
+            width: 460px;
+            max-width: calc(100vw - 2rem);
+            background: var(--surface, #fff);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            box-shadow: 0 10px 32px rgba(0,0,0,.12);
+            padding: .85rem 1rem;
+            font-size: .78rem;
+            font-weight: 400;
+            color: var(--text);
+            line-height: 1.45;
+            opacity: 0;
+            visibility: hidden;
+            transform: translateY(-4px);
+            transition: opacity .12s ease, transform .12s ease, visibility .12s;
+            pointer-events: none;
+            text-align: left;
+        }
+        .sf-info:hover .sf-info-pop,
+        .sf-info:focus .sf-info-pop,
+        .sf-info:focus-within .sf-info-pop,
+        .sf-info-pop:hover {
+            opacity: 1;
+            visibility: visible;
+            transform: translateY(0);
+            pointer-events: auto;
+        }
+        .sf-info-pop::before {
+            content: "";
+            position: absolute;
+            top: -6px; left: 10px;
+            width: 10px; height: 10px;
+            background: inherit;
+            border-left: 1px solid var(--border);
+            border-top: 1px solid var(--border);
+            transform: rotate(45deg);
+        }
+        .sf-info-pop-title {
+            display: block;
+            font-weight: 700;
+            font-size: .82rem;
+            margin-bottom: .15rem;
+            color: var(--text);
+        }
+        .sf-info-pop-sub {
+            display: block;
+            color: var(--text-subtle);
+            font-size: .72rem;
+            margin-bottom: .5rem;
+        }
+        .sf-info-list {
+            list-style: none; margin: 0; padding: 0;
+            display: flex; flex-direction: column; gap: .3rem;
+        }
+        .sf-info-list li {
+            display: flex; align-items: flex-start; gap: .45rem;
+            padding: .22rem 0;
+            border-bottom: 1px dashed var(--border);
+        }
+        .sf-info-list li:last-child { border-bottom: none; }
+        .sf-info-list li .sf-pill { flex-shrink: 0; margin-top: .05rem; min-width: 66px; text-align: center; }
+        .sf-info-list li b { color: var(--text); font-weight: 600; }
         .sf-pill {
             display: inline-flex; align-items: center;
             padding: .2rem .6rem; border-radius: 999px;
@@ -811,8 +883,27 @@ HTML_HEAD = """<!DOCTYPE html>
         .sf-pill-medium   { background: var(--warn-bg); color: #92400e; border-color: var(--warn-border); }
         .sf-pill-info     { background: var(--info-bg); color: #1e40af; border-color: var(--info-border); }
 
+        /* --- CVE links inside Turvaleiud host-list --- */
+        .sf-cve-link {
+            display: inline-flex; align-items: center; gap: .25rem;
+            color: var(--accent); text-decoration: none;
+            border-bottom: 1px dashed transparent;
+            transition: border-color .15s ease;
+        }
+        .sf-cve-link:hover { border-bottom-color: var(--accent); color: var(--accent); }
+        .sf-cve-link i { font-size: .72rem; opacity: .7; }
+        .sf-cve-link:hover i { opacity: 1; }
+        .sf-cve-meta { color: var(--text-muted); font-weight: 400; font-size: .78em; }
+        .sf-cve-more { color: var(--text-muted); font-size: .78em; font-style: italic; }
+
         /* --- CVE / vulnerability table --- */
         .sec-vulns .table-responsive { padding: .25rem 1rem 1rem; }
+        @keyframes sec-jump-flash-anim {
+            0%   { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
+            50%  { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.22); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+        .sec-jump-flash { animation: sec-jump-flash-anim 1.3s ease-out; }
         .cve-table { font-size: .82rem; }
         .cve-table thead th {
             background: var(--bg); color: var(--text-muted);
@@ -906,6 +997,32 @@ HTML_HEAD = """<!DOCTYPE html>
             border-bottom: 1px solid var(--border);
             background: var(--surface-2);
         }
+        .sf-card-head-link {
+            cursor: pointer;
+            transition: background .12s ease;
+        }
+        .sf-card-head-link:hover {
+            background: var(--surface-3, var(--surface-2));
+            filter: brightness(0.97);
+        }
+        .sf-card-head-link:focus-visible {
+            outline: 2px solid var(--info, #3b82f6);
+            outline-offset: -2px;
+        }
+        .sf-head-jump {
+            display: inline-flex;
+            align-items: center;
+            margin-left: .4rem;
+            color: var(--text-subtle);
+            font-size: .82rem;
+            opacity: .7;
+            transition: transform .12s ease, opacity .12s ease;
+        }
+        .sf-card-head-link:hover .sf-head-jump {
+            opacity: 1;
+            transform: translateY(1px);
+            color: var(--text);
+        }
         .sf-icon {
             width: 34px; height: 34px; border-radius: 8px;
             display: inline-flex; align-items: center; justify-content: center;
@@ -942,14 +1059,59 @@ HTML_HEAD = """<!DOCTYPE html>
             padding: .45rem 0; border-bottom: 1px solid var(--border);
         }
         .sf-hosts li:last-child { border-bottom: none; }
+        .sf-host-row {
+            display: flex; align-items: center; gap: .6rem;
+            flex-wrap: wrap;
+        }
         .sf-host-name {
             font-family: "JetBrains Mono", monospace;
             font-size: .82rem; font-weight: 600; color: var(--text);
         }
+        .sf-host-user {
+            display: inline-flex; align-items: center; gap: .28rem;
+            font-size: .72rem; color: var(--text-subtle);
+            background: var(--surface-3, var(--surface-2));
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: .08rem .5rem;
+            font-family: "JetBrains Mono", monospace;
+            line-height: 1.5;
+            white-space: nowrap;
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .sf-host-user i { font-size: .75rem; opacity: .7; }
         .sf-host-detail {
             font-size: .76rem; color: var(--text-subtle);
             margin-top: .15rem; line-height: 1.4;
         }
+        .sf-hosts-more {
+            border-top: 1px solid var(--border);
+            padding: 0;
+        }
+        .sf-hosts-more > summary {
+            list-style: none;
+            cursor: pointer;
+            padding: .55rem 1rem;
+            font-size: .78rem;
+            font-weight: 600;
+            color: var(--text-subtle);
+            user-select: none;
+            display: flex;
+            align-items: center;
+            gap: .4rem;
+        }
+        .sf-hosts-more > summary::-webkit-details-marker { display: none; }
+        .sf-hosts-more > summary::before {
+            content: "▸";
+            display: inline-block;
+            transition: transform .15s ease;
+            color: var(--text-subtle);
+        }
+        .sf-hosts-more[open] > summary::before { transform: rotate(90deg); }
+        .sf-hosts-more > summary:hover { color: var(--text); }
+        .sf-hosts-extra { padding-top: 0; }
         .sf-empty {
             padding: 1.5rem; display: flex; align-items: center; gap: .6rem;
             color: var(--text-subtle); font-size: .9rem;
@@ -1067,29 +1229,39 @@ HTML_HEAD = """<!DOCTYPE html>
             overflow-x: auto; position: relative;
             border: 1px solid var(--border); border-radius: 0 0 var(--r-md) var(--r-md);
         }
-        table.matrix { font-size: .82rem; margin: 0; background: var(--surface); width: 100%; }
+        table.matrix { font-size: .78rem; margin: 0; background: var(--surface); width: 100%; table-layout: auto; }
         table.matrix thead th {
             background: var(--surface-2) !important; color: var(--text-muted) !important;
             border: none !important; border-bottom: 1px solid var(--border) !important;
-            padding: .65rem .6rem;
-            font-weight: 600; font-size: .7rem;
-            letter-spacing: .06em; text-transform: uppercase;
+            padding: .5rem .45rem;
+            font-weight: 600; font-size: .66rem;
+            letter-spacing: .05em; text-transform: uppercase;
         }
         table.matrix th.sw-name-col, table.matrix td.sw-name {
             position: sticky; left: 0; z-index: 2;
-            background: var(--surface); min-width: 300px; text-align: left;
+            background: var(--surface); width: 200px; min-width: 180px; max-width: 240px;
+            text-align: left;
             border-right: 1px solid var(--border);
-            padding: .6rem .9rem;
+            padding: .5rem .7rem;
         }
         table.matrix thead th.sw-name-col { background: var(--surface-2) !important; }
         table.matrix th.host-col {
-            white-space: nowrap; text-align: center; min-width: 130px;
+            text-align: center;
+            min-width: 80px;
+            max-width: 140px;
             font-family: "JetBrains Mono", monospace; font-weight: 500;
+            word-break: break-word; overflow-wrap: anywhere;
         }
         table.matrix td {
-            text-align: center; white-space: nowrap; padding: .55rem .6rem;
+            text-align: center;
+            white-space: normal;
+            word-break: break-word; overflow-wrap: anywhere;
+            padding: .4rem .45rem;
             font-variant-numeric: tabular-nums;
             border-bottom: 1px solid var(--border);
+            font-family: "JetBrains Mono", monospace;
+            font-size: .74rem;
+            line-height: 1.3;
         }
         table.matrix tbody tr:last-child td { border-bottom: none; }
         table.matrix td.missing { color: var(--text-faint); background: var(--surface-2); }
@@ -1108,19 +1280,109 @@ HTML_HEAD = """<!DOCTYPE html>
         table.matrix tbody tr:hover td { filter: brightness(.98); }
         table.matrix tbody tr:hover td.sw-name { background: var(--surface-2); }
         table.matrix td.cell-clickable { cursor: pointer; }
+        table.matrix th.host-count-col,
+        table.matrix td.host-count {
+            text-align: center;
+            min-width: 90px; max-width: 140px;
+            width: 110px;
+            white-space: normal;
+            word-break: normal;
+            overflow-wrap: normal;
+            padding: .45rem .5rem;
+        }
         table.matrix td.host-count {
             color: var(--text-subtle); font-weight: 500; font-size: .76rem;
+            font-family: "JetBrains Mono", monospace;
         }
-        .sw-name .sw-title { font-weight: 600; color: var(--text); font-size: .88rem; }
-        .sw-name .sw-vendor { color: var(--text-subtle); font-size: .75rem; margin-top: .1rem; }
+        table.matrix th.host-count-col {
+            font-size: .62rem; line-height: 1.25;
+        }
+        .sw-name .sw-title {
+            font-weight: 600; color: var(--text); font-size: .8rem;
+            line-height: 1.25; word-break: break-word; overflow-wrap: anywhere;
+        }
+        .sw-name .sw-vendor {
+            color: var(--text-subtle); font-size: .7rem; margin-top: .1rem;
+            line-height: 1.2; word-break: break-word;
+        }
         .sw-name .sw-latest {
-            font-size: .74rem; color: var(--text-subtle); margin-top: .35rem;
-            display: flex; align-items: center; gap: .3rem; flex-wrap: wrap;
+            font-size: .68rem; color: var(--text-subtle); margin-top: .25rem;
+            display: flex; align-items: center; gap: .25rem; flex-wrap: wrap;
         }
-        .sw-name .sw-latest code { font-size: .72rem; }
+        .sw-name .sw-latest code { font-size: .66rem; }
         .row-drift      td.sw-name { border-left: 3px solid var(--warn); }
         .row-unique     td.sw-name { border-left: 3px solid var(--bad); }
         .row-consistent td.sw-name { border-left: 3px solid var(--ok); }
+
+        /* ================ COMPACT MATRIX MODE (50+ hosts) ================ */
+        /* Rotated column headers + color-only cells. Version appears in
+           native browser tooltip (title attribute) on hover. */
+        .matrix-compact table.matrix thead th.host-col {
+            min-width: 28px !important;
+            max-width: 32px !important;
+            width: 28px;
+            padding: 4px 2px;
+            height: 120px;
+            vertical-align: bottom;
+            position: relative;
+            overflow: visible;
+        }
+        .matrix-compact table.matrix thead th.host-col .host-col-label {
+            display: inline-block;
+            transform: rotate(-60deg);
+            transform-origin: left bottom;
+            white-space: nowrap;
+            font-size: .66rem;
+            font-family: "JetBrains Mono", monospace;
+            letter-spacing: 0;
+            text-transform: none;
+            padding-left: 2px;
+            position: absolute;
+            bottom: 6px; left: 50%;
+        }
+        .matrix-compact table.matrix td {
+            min-width: 28px;
+            max-width: 32px;
+            width: 28px;
+            padding: 0;
+            height: 24px;
+            font-size: 0; /* hide version text */
+            line-height: 0;
+            color: transparent;
+        }
+        .matrix-compact table.matrix td.missing {
+            background: var(--surface-2);
+        }
+        .matrix-compact table.matrix td.match {
+            background: #86efac;  /* green */
+        }
+        .matrix-compact table.matrix td.drift {
+            background: #fcd34d;  /* amber */
+        }
+        .matrix-compact table.matrix td.drift.is-latest {
+            background: #34d399;  /* brighter green — drift row but latest */
+        }
+        .matrix-compact table.matrix td.unique {
+            background: #fca5a5;  /* red */
+        }
+        .matrix-compact table.matrix td.drift.is-latest::after {
+            content: none; /* dot not needed in compact mode */
+        }
+        .matrix-compact table.matrix td {
+            border-right: 1px solid rgba(255,255,255,.6);
+        }
+        .matrix-compact table.matrix td:hover {
+            outline: 2px solid var(--text);
+            outline-offset: -2px;
+            z-index: 1;
+            position: relative;
+        }
+        /* In compact mode keep sw-name column narrower too */
+        .matrix-compact table.matrix th.sw-name-col,
+        .matrix-compact table.matrix td.sw-name {
+            width: 220px; min-width: 200px; max-width: 260px;
+        }
+        .matrix-compact table.matrix td.host-count { font-size: .72rem !important; color: var(--text-subtle); }
 
         .matrix-legend {
             display: flex; flex-wrap: wrap; gap: .4rem; align-items: center;
@@ -1239,6 +1501,30 @@ HTML_FOOTER_TAIL = """
             $('#matrixSearch').on('input', applyMatrixFilters);
             applyMatrixFilters();
 
+            // Compact mode toggle (color-only cells + rotated headers)
+            $('#filterCompact').on('change', function() {
+                $('#matrixWrap').toggleClass('matrix-compact', this.checked);
+            });
+
+            // Click-to-jump on security finding card headers
+            function jumpToTarget(id) {
+                var el = document.getElementById(id);
+                if (!el) return;
+                el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                el.classList.add('sec-jump-flash');
+                setTimeout(function() { el.classList.remove('sec-jump-flash'); }, 1400);
+            }
+            $(document).on('click', '[data-jump]', function(e) {
+                e.preventDefault();
+                jumpToTarget($(this).data('jump'));
+            });
+            $(document).on('keydown', '[data-jump]', function(e) {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    jumpToTarget($(this).data('jump'));
+                }
+            });
+
             $('#copyFindingsBtn').on('click', function() {
                 var md = window.__FINDINGS_MD__ || '';
                 var $btn = $('#copyFindingsBtn');
@@ -1288,12 +1574,15 @@ def safe_id(name):
     return re.sub(r'[^a-zA-Z0-9]', '', name) or 'host'
 
 
-def render_hero(hosts, matrix):
+def render_hero(hosts, matrix, cve_findings=None):
     generated = datetime.now().strftime("%d.%m.%Y %H:%M")
     total = len(hosts)
     bitlocker_off = sum(1 for h0 in hosts if not h0['bitlocker'])
     admin_users = sum(1 for h0 in hosts if h0['metrics']['is_admin_user'])
-    drift_total = sum(1 for e in matrix if e['status'] == 'drift')
+    critical_cve_pkgs = sum(
+        1 for e in (cve_findings or [])
+        if (e.get('worst_score') or 0.0) >= 9.0
+    )
 
     def stat(label, value, suffix='', tone=''):
         tone_cls = f' {tone}' if tone else ''
@@ -1307,12 +1596,12 @@ def render_hero(hosts, matrix):
 
     stats = [
         stat('Masinad', total, tone='is-ok'),
+        stat('CVE ≥ 9.0 (tarkvara)', critical_cve_pkgs,
+             tone='is-bad' if critical_cve_pkgs else 'is-ok'),
         stat('BitLocker puudub', bitlocker_off, suffix=f'/ {total}',
              tone='is-bad' if bitlocker_off else 'is-ok'),
         stat('Administraatori õigustes kasutajad', admin_users,
              tone='is-bad' if admin_users else 'is-ok'),
-        stat('Sama tarkvara, eri versioon', drift_total, suffix='paketti',
-             tone='is-warn' if drift_total else 'is-ok'),
     ]
 
     return f"""
@@ -1367,38 +1656,106 @@ def render_security_findings(findings, hosts, matrix):
     if info:
         summary_chips.append(f"<span class='sf-pill sf-pill-info'>{info} info</span>")
 
+    # Host → user map so every card can show the active user alongside hostname
+    host_user = {h0['name']: (h0.get('user') or '').strip() for h0 in hosts}
+
     cards = []
+    SF_HOST_LIMIT = 10
     for f in findings:
         sev = f['severity']
         host_items = []
         for host_entry in f['hosts']:
-            detail_html = (
-                f"<div class='sf-host-detail'>{h(host_entry['detail'])}</div>"
-                if host_entry.get('detail') else ''
+            if host_entry.get('detail_html'):
+                # Pre-rendered HTML (links allowed) — do NOT escape
+                detail_html = (
+                    f"<div class='sf-host-detail'>{host_entry['detail_html']}</div>"
+                )
+            elif host_entry.get('detail'):
+                detail_html = (
+                    f"<div class='sf-host-detail'>{h(host_entry['detail'])}</div>"
+                )
+            else:
+                detail_html = ''
+            user = host_user.get(host_entry['name'], '')
+            user_html = (
+                f"<span class='sf-host-user' title='Aktiivne kasutaja'>"
+                f"<i class='bi bi-person-circle'></i>{h(user)}</span>"
+                if user else ''
             )
             host_items.append(
-                f"<li><div class='sf-host-name'>{h(host_entry['name'])}</div>{detail_html}</li>"
+                f"<li><div class='sf-host-row'>"
+                f"<div class='sf-host-name'>{h(host_entry['name'])}</div>"
+                f"{user_html}"
+                f"</div>{detail_html}</li>"
             )
+        total_hosts = len(host_items)
+        if total_hosts > SF_HOST_LIMIT:
+            visible = ''.join(host_items[:SF_HOST_LIMIT])
+            hidden = ''.join(host_items[SF_HOST_LIMIT:])
+            rest_n = total_hosts - SF_HOST_LIMIT
+            hosts_html = (
+                f"<ul class='sf-hosts'>{visible}</ul>"
+                f"<details class='sf-hosts-more'>"
+                f"<summary>Näita veel +{rest_n} hosti</summary>"
+                f"<ul class='sf-hosts sf-hosts-extra'>{hidden}</ul>"
+                f"</details>"
+            )
+        else:
+            hosts_html = f"<ul class='sf-hosts'>{''.join(host_items)}</ul>"
         count = f.get('summary_count', len(f['hosts']))
         suffix = f.get('summary_suffix', 'masinat')
+        is_vuln = f.get('key') == 'vulnerable_software'
+        head_attrs = (
+            ' class="sf-card-head sf-card-head-link" role="link" tabindex="0"'
+            ' data-jump="vulnerabilities"'
+            ' title="Ava detailne CVE tabel"'
+            if is_vuln else ' class="sf-card-head"'
+        )
+        jump_icon = (
+            '<span class="sf-head-jump" aria-hidden="true">'
+            '<i class="bi bi-arrow-down-circle"></i></span>'
+            if is_vuln else ''
+        )
         cards.append(f"""
             <div class="sf-card sf-{sev}">
-                <div class="sf-card-head">
+                <div{head_attrs}>
                     <span class="sf-icon"><i class="bi bi-{f['icon']}"></i></span>
                     <div class="sf-title-wrap">
                         <span class="sf-sev-label">{SEVERITY_LABEL[sev]}</span>
-                        <div class="sf-title">{h(f['title'])}</div>
+                        <div class="sf-title">{h(f['title'])}{jump_icon}</div>
                     </div>
                     <span class="sf-count">{count} {h(suffix)}</span>
                 </div>
-                <ul class="sf-hosts">{''.join(host_items)}</ul>
+                {hosts_html}
             </div>
         """)
 
     return f"""
         <div class="section-card sec-findings">
             <div class="section-head">
-                <h5><i class="bi bi-shield-exclamation"></i> Turvaleiud</h5>
+                <h5>
+                    <i class="bi bi-shield-exclamation"></i> Turvaleiud
+                    <span class="sf-info" tabindex="0" role="button"
+                          aria-label="Milliseid leide kuvatakse?"
+                          title="Milliseid leide kuvatakse?">
+                        <i class="bi bi-info-circle"></i>
+                        <span class="sf-info-pop" role="tooltip">
+                            <span class="sf-info-pop-title">Võimalikud turvaleiud</span>
+                            <span class="sf-info-pop-sub">Plokk kuvatakse ainult siis, kui vähemalt üks host vastab tingimusele.</span>
+                            <ul class="sf-info-list">
+                                <li><span class="sf-pill sf-pill-critical">kriitiline</span> <b>Teadaolevad haavatavused (CVE)</b> — NVD leiab paigaldatud tarkvara versioonile CVE-d</li>
+                                <li><span class="sf-pill sf-pill-critical">kriitiline</span> <b>Defender mitteaktiivne</b> — Windows Defender reaalaja kaitse ei tööta</li>
+                                <li><span class="sf-pill sf-pill-high">kõrge</span> <b>Aktiivne kasutaja on lokaalne administraator</b> — Current_user kuulub kohalikku Administrators-gruppi</li>
+                                <li><span class="sf-pill sf-pill-high">kõrge</span> <b>BitLocker puudub</b> — C: draiv ei ole krüpteeritud</li>
+                                <li><span class="sf-pill sf-pill-medium">keskmine</span> <b>Mittestandardsed teenused vigases olekus</b> — mõni märgitud teenus pole staatuses OK</li>
+                                <li><span class="sf-pill sf-pill-medium">keskmine</span> <b>Mitu lokaalset administraatorit</b> — üle 1 mitte-sisseehitatud admini</li>
+                                <li><span class="sf-pill sf-pill-medium">keskmine</span> <b>Windows Update vanem kui 30 päeva</b> — viimane edukas uuendus üle läve</li>
+                                <li><span class="sf-pill sf-pill-medium">keskmine</span> <b>Kauglaua / kaughalduse tarkvara</b> — VNC, RDP-tööriistad, TeamViewer, AnyDesk jms</li>
+                                <li><span class="sf-pill sf-pill-info">info</span> <b>Pikk uptime (>30 päeva)</b> — viimasest alglaadimisest üle läve</li>
+                            </ul>
+                        </span>
+                    </span>
+                </h5>
                 <div class="sf-head-right">
                     <div class="sf-summary">{''.join(summary_chips)}</div>
                     <button type="button" id="copyFindingsBtn" class="btn btn-sm btn-copy-findings">
@@ -1508,9 +1865,15 @@ def render_host_table(hosts, safe_ids):
 
 def render_matrix(matrix, hosts, safe_ids):
     host_names = [host['name'] for host in hosts]
+    # Wrap hostname in a span so we can rotate it in compact mode
     header_cells = "".join(
-        f'<th class="host-col">{h(n)}</th>' for n in host_names
+        f'<th class="host-col" title="{h(n)}"><span class="host-col-label">{h(n)}</span></th>'
+        for n in host_names
     )
+    # Auto-compact when there are many hosts
+    default_compact = len(host_names) > 12
+    compact_checked_attr = 'checked' if default_compact else ''
+    compact_wrap_cls = ' matrix-compact' if default_compact else ''
 
     body_rows = []
     for entry in matrix:
@@ -1518,13 +1881,17 @@ def render_matrix(matrix, hosts, safe_ids):
         for hn in host_names:
             info = entry['per_host'].get(hn)
             if not info:
-                cells.append('<td class="missing">–</td>')
+                cells.append(
+                    f'<td class="missing" data-ver="–" '
+                    f'title="{h(hn)}: pole paigaldatud">–</td>'
+                )
                 continue
             ver = info['version']
             idate = info['install_date']
-            title = ''
+            date_part = ''
             if idate and len(idate) == 8:
-                title = f' title="Paigaldatud: {idate[:4]}-{idate[4:6]}-{idate[6:8]}"'
+                date_part = f" · paigaldatud {idate[:4]}-{idate[4:6]}-{idate[6:8]}"
+            title = f' title="{h(hn)}: {h(ver)}{date_part}"'
             if entry['status'] == 'unique':
                 cls = 'unique'
             elif entry['status'] == 'drift':
@@ -1534,7 +1901,8 @@ def render_matrix(matrix, hosts, safe_ids):
             else:
                 cls = 'match'
             cells.append(
-                f'<td class="{cls} cell-clickable" data-host="{safe_ids[hn]}"{title}>{h(ver)}</td>'
+                f'<td class="{cls} cell-clickable" data-host="{safe_ids[hn]}" '
+                f'data-ver="{h(ver)}"{title}>{h(ver)}</td>'
             )
 
         vendor = entry['vendor'] if entry['vendor'] and entry['vendor'] != '-' else ''
@@ -1589,18 +1957,22 @@ def render_matrix(matrix, hosts, safe_ids):
                         <input type="checkbox" id="filterHideEid" checked>
                         <label for="filterHideEid"><i class="bi bi-eye-slash"></i>Peida eID</label>
                     </div>
+                    <div class="form-check">
+                        <input type="checkbox" id="filterCompact" {compact_checked_attr}>
+                        <label for="filterCompact"><i class="bi bi-grid-fill"></i>Tihe režiim</label>
+                    </div>
                 </div>
                 <div class="visible-count">
                     Nähtav <strong id="matrixVisibleCount">–</strong> / {len(matrix)}
                 </div>
             </div>
-            <div class="matrix-wrap">
+            <div class="matrix-wrap{compact_wrap_cls}" id="matrixWrap">
                 <table id="matrixTable" class="table matrix mb-0">
                     <thead>
                         <tr>
                             <th class="sw-name-col">Tarkvara · uusim versioon</th>
                             {header_cells}
-                            <th>Hosti kate</th>
+                            <th class="host-count-col">Paigaldatud arvutitesse</th>
                         </tr>
                     </thead>
                     <tbody>{"".join(body_rows)}</tbody>
@@ -1914,6 +2286,8 @@ def query_cves_for_cpe(vendor, product, version, api_key, cache):
             'url': f'https://nvd.nist.gov/vuln/detail/{cid}',
             'published': c.get('published', ''),
         })
+    # Also store a product-level search URL (fallback when no specific CVE)
+    # Not needed inside individual entries.
 
     # Sort highest CVSS first
     cves.sort(key=lambda x: (x['score'] is None, -(x['score'] or 0.0)))
@@ -1982,6 +2356,7 @@ def scan_fleet_for_cves(hosts, matrix, api_key):
                 'worst_score': worst['score'],
                 'worst_severity': worst['severity'],
                 'worst_id': worst['id'],
+                'worst_url': worst['url'],
             })
 
     _save_cve_cache(cache)
@@ -2015,20 +2390,33 @@ def build_vulnerable_software_finding(cve_findings, host_cve_index):
     rank_to_sev = {v: k for k, v in SEVERITY_ORDER.items()}
     finding_sev = rank_to_sev[worst_sev_rank]
 
-    hosts_list = []
-    for host_name in sorted(host_cve_index.keys()):
-        pkgs = host_cve_index[host_name]
+    # Sort hosts by their max CVSS score (desc), tie-break alphabetical
+    host_items = []
+    for host_name, pkgs in host_cve_index.items():
         pkgs.sort(key=lambda p: -(p['worst_score'] or 0.0))
+        host_max = max((p['worst_score'] or 0.0) for p in pkgs) if pkgs else 0.0
+        host_items.append((host_name, pkgs, host_max))
+    host_items.sort(key=lambda t: (-t[2], t[0]))
+
+    hosts_list = []
+    for host_name, pkgs, _host_max in host_items:
         top = pkgs[:3]
-        detail_parts = [
-            f"{p['package']} {p['version']} (CVSS {p['worst_score']}, {p['cve_count']} CVE)"
-            for p in top
-        ]
+        link_parts = []
+        for p in top:
+            pkg_name = h(f"{p['package']} {p['version']}")
+            score_txt = h(f"CVSS {p['worst_score']}, {p['cve_count']} CVE")
+            url = h(p['worst_url'])
+            link_parts.append(
+                f'<a href="{url}" target="_blank" rel="noopener" '
+                f'class="sf-cve-link" title="Ava worst CVE NVD-s: {h(p["worst_id"])}">'
+                f'{pkg_name} <span class="sf-cve-meta">({score_txt})</span>'
+                f'<i class="bi bi-box-arrow-up-right"></i></a>'
+            )
         if len(pkgs) > 3:
-            detail_parts.append(f"+{len(pkgs)-3} veel")
+            link_parts.append(f'<span class="sf-cve-more">+{len(pkgs)-3} veel</span>')
         hosts_list.append({
             'name': host_name,
-            'detail': ' | '.join(detail_parts),
+            'detail_html': ' · '.join(link_parts),
         })
 
     total_cves = sum(e['cve_count'] for e in cve_findings)
@@ -2096,10 +2484,10 @@ def render_vulnerability_section(cve_findings):
     hosts_affected = len(set(hn for e in cve_findings for hn in e['hosts']))
 
     return f"""
-    <div class="section-card sec-vulns">
+    <div class="section-card sec-vulns" id="vulnerabilities">
         <div class="section-head">
             <h5><i class="bi bi-shield-exclamation"></i> Teadaolevad haavatavused (NVD CVE)</h5>
-            <div class="sub">{total_pkgs} haavatavat paketti · {total_cves} CVE · {hosts_affected} hosti</div>
+            <div class="sub">{total_pkgs} haavatavat tarkvara · {total_cves} CVE · {hosts_affected} hosti</div>
         </div>
         <div class="table-responsive">
             <table class="table cve-table">
@@ -2153,14 +2541,20 @@ def main():
     vuln_finding = build_vulnerable_software_finding(cve_findings, host_cve_index)
     if vuln_finding:
         findings.append(vuln_finding)
-        findings.sort(key=lambda f: (SEVERITY_ORDER[f['severity']], f['key']))
+        _pin = {'vulnerable_software': 0, 'admin_user': 1, 'bitlocker_off': 2}
+        findings.sort(key=lambda f: (
+            0 if f['key'] in _pin else 1,
+            _pin.get(f['key'], 0),
+            SEVERITY_ORDER[f['severity']],
+            f['key'],
+        ))
 
     drift_count = sum(1 for e in matrix if e['status'] == 'drift')
     unique_count = sum(1 for e in matrix if e['status'] == 'unique')
 
     html_out = (
         HTML_HEAD
-        + render_hero(hosts, matrix)
+        + render_hero(hosts, matrix, cve_findings)
         + render_security_findings(findings, hosts, matrix)
         + render_vulnerability_section(cve_findings)
         + render_host_table(hosts, safe_ids)
@@ -2182,7 +2576,7 @@ def main():
     print(f"  Unikaalsed paigaldused:   {unique_count}")
     if cve_findings:
         total_cves = sum(e['cve_count'] for e in cve_findings)
-        print(f"  Haavatavaid pakette:      {len(cve_findings)} ({total_cves} CVE)")
+        print(f"  Haavatavat tarkvara:      {len(cve_findings)} ({total_cves} CVE)")
 
 
 if __name__ == '__main__':
