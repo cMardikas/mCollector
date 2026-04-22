@@ -75,7 +75,7 @@ On systems with `systemd-resolved`, LLMNR packets on port 5355 may be intercepte
   ╚═╝   ╚═╝  ╚═════╝ ╚═════╝ ╚══════╝╚══════╝╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝
                                     S E R V E R
 
-  version   : 1.3.8
+  version   : 1.3.9
   build     : Mar 26 2026 12:00:00
   hashes    : uploads/hashes.txt                      hashcat -m 5600
   loaded    : 1 previously captured user(s)
@@ -187,8 +187,43 @@ openssl req -x509 -newkey rsa:2048 -days 730000 -nodes \
 | `mongoose.c` / `mongoose.h` | [Mongoose](https://github.com/cesanta/mongoose) HTTP library |
 | `mdns.h` | [mjansson/mdns](https://github.com/mjansson/mdns) mDNS library |
 | `mCollector.ps1` | PowerShell client collection script |
+| `koondraport.py` | Fleet HTML report generator with NVD CVE scanning |
 | `index.html` | Web upload interface |
 | `Makefile` | Build configuration |
+
+## Tarkvara koondraport (`koondraport.py`)
+
+After collecting host inventories (software lists + system info) via `mCollector.ps1`, generate an HTML fleet report with CVE scanning:
+
+```bash
+# Scan all uploaded host JSONs against NVD and generate HTML report
+export NVD_API_KEY=your-nvd-api-key     # optional but strongly recommended
+python3 koondraport.py
+```
+
+Output: `uploads/koondraport_YYYY-MM-DD_HH-MM-SS.html` — self-contained dark-themed report.
+
+### What the report shows
+
+- **Hero**: machine count · CVE ≥ 9.0 (packages) · BitLocker missing · local admin users
+- **Turvaleiud (security findings)**: 9 finding categories with pinned order (CVE → Admin → BitLocker), expandable host lists, per-host user chip
+  - CVE (critical) · Defender off (critical) · BitLocker off (high) · Admin user (high)
+  - Bad services · Many admins · Stale updates · Remote access (medium)
+  - Long uptime (info)
+- **Teadaolevad haavatavused (known vulnerabilities)**: sortable CVE table from NVD API, CVSS v3.1 scores, Estonian severity labels (Kriitiline / Kõrge / Keskmine / Madal)
+- **Paigaldatud arvutitesse**: cross-host software matrix with version-drift detection (compact color-grid mode auto-enabled for 12+ hosts)
+- **Per-host details**: installed software, services, scheduled tasks, admin users, network info
+
+### NVD CVE scan
+
+- Queries [NVD v2 API](https://nvd.nist.gov/developers/vulnerabilities) for known CVEs per unique `vendor:product:version` combination
+- Results cached 24 h at `.cve_cache.json` (next to the script) — rerunning is ~100× faster
+- [Request a free NVD API key](https://nvd.nist.gov/developers/request-an-api-key) for 50 req/30 s rate-limit (without key: 5 req/30 s)
+- Vendor/product mapping handled via an internal whitelist (Adobe, Chrome, LibreOffice, Oracle JDK, Foxit, Microsoft Teams, FortiClient, etc.)
+
+### Input format
+
+Drop per-host JSON files into `uploads/` (produced by `mCollector.ps1`). The script auto-discovers all `*.json` files and ignores dot-files. Each JSON should contain `Hostname`, `InstalledSoftware`, `Services`, `LocalAdmins`, `BitLocker`, etc.
 
 ## Credits
 
