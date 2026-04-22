@@ -75,7 +75,7 @@ On systems with `systemd-resolved`, LLMNR packets on port 5355 may be intercepte
   ╚═╝   ╚═╝  ╚═════╝ ╚═════╝ ╚══════╝╚══════╝╚══════╝ ╚═════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═╝
                                     S E R V E R
 
-  version   : 1.3.3
+  version   : 1.3.4
   build     : Mar 26 2026 12:00:00
   hashes    : uploads/hashes.txt                      hashcat -m 5600
   loaded    : 1 previously captured user(s)
