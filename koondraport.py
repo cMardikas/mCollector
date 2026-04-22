@@ -11,10 +11,15 @@ Stdlib only.
 import json
 import os
 import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from html import escape as h
 
-__version__ = '1.3.6'
+__version__ = '1.3.7'
 
 UPLOAD_DIR = 'uploads'
 OUTPUT_PREFIX = 'koondraport'
@@ -805,6 +810,60 @@ HTML_HEAD = """<!DOCTYPE html>
         .sf-pill-high     { background: var(--bad-bg); color: #991b1b; border-color: var(--bad-border); }
         .sf-pill-medium   { background: var(--warn-bg); color: #92400e; border-color: var(--warn-border); }
         .sf-pill-info     { background: var(--info-bg); color: #1e40af; border-color: var(--info-border); }
+
+        /* --- CVE / vulnerability table --- */
+        .sec-vulns .table-responsive { padding: .25rem 1rem 1rem; }
+        .cve-table { font-size: .82rem; }
+        .cve-table thead th {
+            background: var(--bg); color: var(--text-muted);
+            font-size: .7rem; font-weight: 600; text-transform: uppercase;
+            letter-spacing: .04em; border-bottom: 1px solid var(--border);
+            padding: .55rem .6rem;
+        }
+        .cve-table tbody td {
+            padding: .55rem .6rem; vertical-align: top;
+            border-bottom: 1px solid var(--border);
+        }
+        .cve-table .mono { font-family: 'JetBrains Mono', monospace; font-size: .78rem; }
+        .cve-cpe { font-family: 'JetBrains Mono', monospace; font-size: .7rem; color: var(--text-muted); }
+        .cve-sev-badge {
+            display: inline-block; min-width: 2.4rem; text-align: center;
+            padding: .25rem .55rem; border-radius: var(--r-sm);
+            font-weight: 700; font-variant-numeric: tabular-nums;
+            font-size: .85rem;
+        }
+        .cve-sev-critical { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+        .cve-sev-high     { background: var(--bad-bg); color: #991b1b; border: 1px solid var(--bad-border); }
+        .cve-sev-medium   { background: var(--warn-bg); color: #92400e; border: 1px solid var(--warn-border); }
+        .cve-sev-low      { background: var(--info-bg); color: #1e40af; border: 1px solid var(--info-border); }
+        .cve-sev-none     { background: var(--bg); color: var(--text-muted); border: 1px solid var(--border); }
+        .cve-item {
+            display: flex; gap: .5rem; align-items: flex-start;
+            padding: .2rem 0;
+            border-bottom: 1px dashed var(--border);
+        }
+        .cve-item:last-child { border-bottom: none; }
+        .cve-id {
+            font-family: 'JetBrains Mono', monospace; font-size: .72rem;
+            font-weight: 600; text-decoration: none; white-space: nowrap;
+            color: var(--accent);
+        }
+        .cve-id:hover { text-decoration: underline; }
+        .cve-score {
+            font-size: .7rem; font-weight: 600;
+            padding: .1rem .35rem; border-radius: 4px;
+            white-space: nowrap;
+        }
+        .cve-desc { font-size: .72rem; color: var(--text-muted); line-height: 1.3; }
+        .cve-more { margin-top: .35rem; }
+        .cve-more summary {
+            font-size: .7rem; color: var(--accent); cursor: pointer;
+            font-weight: 600; list-style: none;
+        }
+        .cve-more summary::before { content: "▸ "; }
+        .cve-more[open] summary::before { content: "▾ "; }
+        .cve-more-list { margin-top: .35rem; font-size: .7rem; line-height: 1.6; }
+        .cve-more-list a { font-family: 'JetBrains Mono', monospace; color: var(--accent); }
 
         .btn-copy-findings {
             --bs-btn-color: var(--text);
@@ -1678,6 +1737,392 @@ def render_modals(hosts, matrix, safe_ids):
 
 
 # ---------------------------------------------------------------------------
+# CVE / NVD integration
+# ---------------------------------------------------------------------------
+
+# Map from normalised software name prefix -> (CPE vendor, CPE product).
+# Focused on widely-deployed desktop software that historically has CVEs.
+# Everything not in this table is skipped — Windows Update components,
+# vendor-specific engineering apps (ArcGIS, Bentley, Autodesk), and small
+# utilities rarely have useful CPE matches and just add noise.
+CVE_PRODUCT_MAP = [
+    # (regex on display_name (case-insensitive), cpe_vendor, cpe_product)
+    (r'^google chrome\b',                        'google',       'chrome'),
+    (r'^mozilla firefox\b',                      'mozilla',      'firefox'),
+    (r'^firefox\b',                              'mozilla',      'firefox'),
+    (r'^microsoft edge\b',                       'microsoft',    'edge_chromium'),
+    (r'^adobe acrobat(?! reader)',               'adobe',        'acrobat'),
+    (r'^adobe acrobat reader\b',                 'adobe',        'acrobat_reader'),
+    (r'^adobe reader\b',                         'adobe',        'acrobat_reader'),
+    (r'^adobe air\b',                            'adobe',        'air'),
+    (r'^foxit pdf reader\b',                     'foxit',        'pdf_reader'),
+    (r'^foxit reader\b',                         'foxit',        'reader'),
+    (r'^7-?zip\b',                               '7-zip',        '7-zip'),
+    (r'^winrar\b',                               'rarlab',       'winrar'),
+    (r'^notepad\+\+\b',                          'notepad-plus-plus', 'notepad\\+\\+'),
+    (r'^putty\b',                                'putty',        'putty'),
+    (r'^filezilla\b',                            'filezilla-project', 'filezilla'),
+    (r'^winscp\b',                               'winscp',       'winscp'),
+    (r'^openvpn\b',                              'openvpn',      'openvpn'),
+    (r'^forticlient\b',                          'fortinet',     'forticlient'),
+    (r'^vlc(\s+media\s+player)?\b',              'videolan',     'vlc_media_player'),
+    (r'^zoom\b',                                 'zoom',         'meetings'),
+    (r'^microsoft teams\b',                      'microsoft',    'teams'),
+    (r'^slack\b',                                'slack',        'slack'),
+    (r'^skype\b',                                'microsoft',    'skype'),
+    (r'^git(\s+for\s+windows)?\b',               'git-scm',      'git'),
+    (r'^node(\.js)?\b',                          'nodejs',       'node.js'),
+    (r'^python\s+\d',                            'python',       'python'),
+    (r'^wireshark\b',                            'wireshark',    'wireshark'),
+    (r'^libreoffice\b',                          'libreoffice',  'libreoffice'),
+    (r'^openoffice\b',                           'apache',       'openoffice'),
+    (r'^dropbox\b',                              'dropbox',      'dropbox'),
+    (r'^teamviewer\b',                           'teamviewer',   'teamviewer'),
+    (r'^anydesk\b',                              'anydesk',      'anydesk'),
+    (r'^vmware\s+(workstation|player)\b',        'vmware',       'workstation'),
+    (r'^virtualbox\b',                           'oracle',       'vm_virtualbox'),
+    (r'^docker\s+desktop\b',                     'docker',       'desktop'),
+    (r'^digidoc4\s+client\b',                    'ria',          'digidoc4_client'),
+    (r'^openjdk\b|^adoptopenjdk\b',              'oracle',       'jdk'),
+    (r'^(oracle\s+)?java(\s+\d+)?\b',            'oracle',       'jre'),
+]
+
+# Cache on disk so subsequent runs don't re-query identical (product, version).
+CVE_CACHE_FILE = os.path.join(UPLOAD_DIR, '.cve_cache.json')
+CVE_CACHE_TTL_SEC = 24 * 3600
+NVD_API_URL = 'https://services.nvd.nist.gov/rest/json/cves/2.0'
+NVD_USER_AGENT = f'koondraport/{__version__}'
+
+
+def _load_cve_cache():
+    if not os.path.exists(CVE_CACHE_FILE):
+        return {}
+    try:
+        with open(CVE_CACHE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return data
+    except Exception:
+        return {}
+
+
+def _save_cve_cache(cache):
+    try:
+        os.makedirs(os.path.dirname(CVE_CACHE_FILE) or '.', exist_ok=True)
+        tmp = CVE_CACHE_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, CVE_CACHE_FILE)
+    except Exception as e:
+        print(f"  [CVE cache save failed: {e}]", file=sys.stderr)
+
+
+def _clean_version_for_cpe(version):
+    """NVD wants semver-ish '1.2.3.4' style. Strip trailing whitespace
+    and anything after first space (e.g. '11.0.8.10 LTS' -> '11.0.8.10')."""
+    if not version or version == '-':
+        return None
+    v = str(version).strip().split()[0]
+    # Keep only digits, dots, dashes — strip arch tags etc.
+    v = re.sub(r'[^0-9A-Za-z.\-]', '', v)
+    return v or None
+
+
+def map_to_cpe(display_name, version):
+    """Return (vendor, product, version) suitable for a CPE 2.3 string,
+    or None if the software is not in our whitelist."""
+    if not display_name:
+        return None
+    name_lc = display_name.lower()
+    v = _clean_version_for_cpe(version)
+    if not v:
+        return None
+    for pattern, vendor, product in CVE_PRODUCT_MAP:
+        if re.search(pattern, name_lc):
+            return (vendor, product, v)
+    return None
+
+
+def _nvd_request(params, api_key, attempt=1):
+    qs = urllib.parse.urlencode(params)
+    url = f'{NVD_API_URL}?{qs}'
+    headers = {'User-Agent': NVD_USER_AGENT}
+    if api_key:
+        headers['apiKey'] = api_key
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        # 403/429 => backoff and retry once
+        if e.code in (403, 429, 503) and attempt <= 2:
+            time.sleep(6)
+            return _nvd_request(params, api_key, attempt + 1)
+        raise
+
+
+def _extract_cvss(cve):
+    metrics = cve.get('metrics', {}) or {}
+    for key in ('cvssMetricV31', 'cvssMetricV30', 'cvssMetricV2'):
+        arr = metrics.get(key) or []
+        if arr:
+            d = arr[0].get('cvssData', {}) or {}
+            score = d.get('baseScore')
+            sev = d.get('baseSeverity') or arr[0].get('baseSeverity')
+            vector = d.get('vectorString', '')
+            return score, sev, vector, key
+    return None, None, '', ''
+
+
+def query_cves_for_cpe(vendor, product, version, api_key, cache):
+    """Return list of CVE dicts for a given (vendor, product, version).
+    Uses disk cache keyed on vendor:product:version."""
+    cache_key = f'{vendor}:{product}:{version}'
+    now = int(time.time())
+    entry = cache.get(cache_key)
+    if entry and entry.get('ts', 0) + CVE_CACHE_TTL_SEC > now:
+        return entry.get('cves', [])
+
+    cpe = f'cpe:2.3:a:{vendor}:{product}:{version}:*:*:*:*:*:*:*'
+    params = {'virtualMatchString': cpe, 'resultsPerPage': 100}
+    try:
+        data = _nvd_request(params, api_key)
+    except Exception as e:
+        print(f"  [NVD query failed for {vendor} {product} {version}: {e}]", file=sys.stderr)
+        return []
+
+    cves = []
+    for item in data.get('vulnerabilities', []) or []:
+        c = item.get('cve', {}) or {}
+        cid = c.get('id')
+        if not cid:
+            continue
+        score, sev, vector, metric_ver = _extract_cvss(c)
+        desc_en = next(
+            (d.get('value', '') for d in c.get('descriptions', []) or []
+             if d.get('lang') == 'en'),
+            ''
+        )
+        cves.append({
+            'id': cid,
+            'score': score,
+            'severity': (sev or '').lower(),
+            'vector': vector,
+            'metric': metric_ver,
+            'description': desc_en.strip(),
+            'url': f'https://nvd.nist.gov/vuln/detail/{cid}',
+            'published': c.get('published', ''),
+        })
+
+    # Sort highest CVSS first
+    cves.sort(key=lambda x: (x['score'] is None, -(x['score'] or 0.0)))
+    cache[cache_key] = {'ts': now, 'cves': cves}
+    return cves
+
+
+def scan_fleet_for_cves(hosts, matrix, api_key):
+    """Scan all host+software combinations against NVD.
+
+    Returns:
+        cve_findings: list of per-package dicts
+            {name, vendor, product, version, cves: [...], hosts: [names]}
+        host_cve_index: {host_name: [{package, version, cve, score, severity}]}
+    """
+    cache = _load_cve_cache()
+    # (vendor, product, version) -> list of hosts running it
+    triples = {}
+    for entry in matrix:
+        for host_name, info in entry['per_host'].items():
+            mapping = map_to_cpe(entry['display_name'], info.get('version'))
+            if not mapping:
+                continue
+            triples.setdefault(mapping, {
+                'display_name': entry['display_name'],
+                'hosts': [],
+            })
+            triples[mapping]['hosts'].append(host_name)
+
+    if not triples:
+        print("  [CVE scan: no packages matched whitelist]")
+        return [], {}
+
+    print(f"  [CVE scan: {len(triples)} unique package+version against NVD]")
+    # Rate-limit: with key 50 req / 30s; without 5 req / 30s.
+    # Sleep 0.7s between calls with key, 6.5s without.
+    delay = 0.7 if api_key else 6.5
+
+    cve_findings = []
+    host_cve_index = {}
+    for i, ((vendor, product, version), meta) in enumerate(sorted(triples.items())):
+        if i > 0:
+            time.sleep(delay)
+        cves = query_cves_for_cpe(vendor, product, version, api_key, cache)
+        if not cves:
+            continue
+        worst = cves[0]
+        entry = {
+            'display_name': meta['display_name'],
+            'vendor': vendor,
+            'product': product,
+            'version': version,
+            'hosts': sorted(set(meta['hosts'])),
+            'cves': cves,
+            'cve_count': len(cves),
+            'worst_score': worst['score'],
+            'worst_severity': worst['severity'],
+            'worst_id': worst['id'],
+        }
+        cve_findings.append(entry)
+        for host_name in entry['hosts']:
+            host_cve_index.setdefault(host_name, []).append({
+                'package': meta['display_name'],
+                'version': version,
+                'cve_count': len(cves),
+                'worst_score': worst['score'],
+                'worst_severity': worst['severity'],
+                'worst_id': worst['id'],
+            })
+
+    _save_cve_cache(cache)
+
+    # Sort packages by worst CVSS descending
+    cve_findings.sort(key=lambda x: -(x['worst_score'] or 0.0))
+    return cve_findings, host_cve_index
+
+
+_CVE_SEVERITY_TO_FINDING = {
+    'critical': 'critical',
+    'high': 'high',
+    'medium': 'medium',
+    'low': 'info',
+    'none': 'info',
+    '': 'info',
+}
+
+
+def build_vulnerable_software_finding(cve_findings, host_cve_index):
+    """Collapse per-package findings into a single Turvaleiud entry."""
+    if not cve_findings:
+        return None
+    # Finding severity = highest per-host severity we saw
+    worst_sev_rank = 3  # info
+    for entry in cve_findings:
+        sev = _CVE_SEVERITY_TO_FINDING.get(entry['worst_severity'], 'info')
+        rank = SEVERITY_ORDER.get(sev, 3)
+        if rank < worst_sev_rank:
+            worst_sev_rank = rank
+    rank_to_sev = {v: k for k, v in SEVERITY_ORDER.items()}
+    finding_sev = rank_to_sev[worst_sev_rank]
+
+    hosts_list = []
+    for host_name in sorted(host_cve_index.keys()):
+        pkgs = host_cve_index[host_name]
+        pkgs.sort(key=lambda p: -(p['worst_score'] or 0.0))
+        top = pkgs[:3]
+        detail_parts = [
+            f"{p['package']} {p['version']} (CVSS {p['worst_score']}, {p['cve_count']} CVE)"
+            for p in top
+        ]
+        if len(pkgs) > 3:
+            detail_parts.append(f"+{len(pkgs)-3} veel")
+        hosts_list.append({
+            'name': host_name,
+            'detail': ' | '.join(detail_parts),
+        })
+
+    total_cves = sum(e['cve_count'] for e in cve_findings)
+    return {
+        'key': 'vulnerable_software',
+        'title': 'Teadaolevad haavatavused (CVE)',
+        'severity': finding_sev,
+        'icon': 'shield-exclamation',
+        'hosts': hosts_list,
+        'summary_count': total_cves,
+        'summary_suffix': 'CVE-d',
+    }
+
+
+def render_vulnerability_section(cve_findings):
+    """Dedicated section with a sortable table of vulnerable packages."""
+    if not cve_findings:
+        return ''
+
+    rows = []
+    for entry in cve_findings:
+        hosts_html = ', '.join(h(hn) for hn in entry['hosts'])
+        # Top-3 CVEs inline, rest collapsible
+        top = entry['cves'][:3]
+        rest = entry['cves'][3:]
+        top_html = []
+        for c in top:
+            sc = f"{c['score']}" if c['score'] is not None else '—'
+            sev = c['severity'].upper() if c['severity'] else ''
+            sev_class = c['severity'] or 'none'
+            top_html.append(
+                f'<div class="cve-item">'
+                f'<a href="{h(c["url"])}" target="_blank" rel="noopener" class="cve-id">{h(c["id"])}</a>'
+                f'<span class="cve-score cve-sev-{h(sev_class)}">{h(sc)} {h(sev)}</span>'
+                f'<span class="cve-desc">{h(c["description"][:160])}'
+                + ('…' if len(c['description']) > 160 else '')
+                + '</span></div>'
+            )
+        rest_html = ''
+        if rest:
+            rest_ids = ', '.join(
+                f'<a href="{h(c["url"])}" target="_blank" rel="noopener">{h(c["id"])}</a>'
+                for c in rest
+            )
+            rest_html = (
+                f'<details class="cve-more"><summary>+{len(rest)} veel</summary>'
+                f'<div class="cve-more-list">{rest_ids}</div></details>'
+            )
+        worst_sev = entry['worst_severity'] or 'none'
+        worst_score = f"{entry['worst_score']}" if entry['worst_score'] is not None else '—'
+        rows.append(
+            f'<tr>'
+            f'<td><span class="cve-sev-badge cve-sev-{h(worst_sev)}">{h(worst_score)}</span></td>'
+            f'<td><strong>{h(entry["display_name"])}</strong><br>'
+            f'<span class="cve-cpe">{h(entry["vendor"])}:{h(entry["product"])}</span></td>'
+            f'<td class="mono">{h(entry["version"])}</td>'
+            f'<td>{hosts_html}</td>'
+            f'<td>{entry["cve_count"]}</td>'
+            f'<td>{"".join(top_html)}{rest_html}</td>'
+            f'</tr>'
+        )
+
+    total_pkgs = len(cve_findings)
+    total_cves = sum(e['cve_count'] for e in cve_findings)
+    hosts_affected = len(set(hn for e in cve_findings for hn in e['hosts']))
+
+    return f"""
+    <div class="section-card sec-vulns">
+        <div class="section-head">
+            <h5><i class="bi bi-shield-exclamation"></i> Teadaolevad haavatavused (NVD CVE)</h5>
+            <div class="sub">{total_pkgs} haavatavat paketti · {total_cves} CVE · {hosts_affected} hosti</div>
+        </div>
+        <div class="table-responsive">
+            <table class="table cve-table">
+                <thead>
+                    <tr>
+                        <th>Max CVSS</th>
+                        <th>Tarkvara</th>
+                        <th>Versioon</th>
+                        <th>Hostid</th>
+                        <th>CVE-d</th>
+                        <th>Näited (top 3)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {''.join(rows)}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    """
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1698,6 +2143,18 @@ def main():
     safe_ids = {host['name']: safe_id(host['name']) for host in hosts}
     findings = compute_security_findings(hosts, matrix)
 
+    # --- CVE / NVD scan ---
+    api_key = os.environ.get('NVD_API_KEY', '').strip() or None
+    if api_key:
+        print("  [NVD API key detected — using authenticated rate-limit]")
+    else:
+        print("  [No NVD_API_KEY env var — using public (slower) rate-limit]")
+    cve_findings, host_cve_index = scan_fleet_for_cves(hosts, matrix, api_key)
+    vuln_finding = build_vulnerable_software_finding(cve_findings, host_cve_index)
+    if vuln_finding:
+        findings.append(vuln_finding)
+        findings.sort(key=lambda f: (SEVERITY_ORDER[f['severity']], f['key']))
+
     drift_count = sum(1 for e in matrix if e['status'] == 'drift')
     unique_count = sum(1 for e in matrix if e['status'] == 'unique')
 
@@ -1705,6 +2162,7 @@ def main():
         HTML_HEAD
         + render_hero(hosts, matrix)
         + render_security_findings(findings, hosts, matrix)
+        + render_vulnerability_section(cve_findings)
         + render_host_table(hosts, safe_ids)
         + render_matrix(matrix, hosts, safe_ids)
         + render_modals(hosts, matrix, safe_ids)
@@ -1722,6 +2180,9 @@ def main():
     print(f"  Tarkvara kokku:           {len(matrix)}")
     print(f"  Vananenud paketid:        {drift_count}")
     print(f"  Unikaalsed paigaldused:   {unique_count}")
+    if cve_findings:
+        total_cves = sum(e['cve_count'] for e in cve_findings)
+        print(f"  Haavatavaid pakette:      {len(cve_findings)} ({total_cves} CVE)")
 
 
 if __name__ == '__main__':
