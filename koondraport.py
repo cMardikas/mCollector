@@ -19,7 +19,7 @@ import urllib.request
 from datetime import datetime, timezone
 from html import escape as h
 
-__version__ = '1.3.8'
+__version__ = '1.3.9'
 
 UPLOAD_DIR = 'uploads'
 OUTPUT_PREFIX = 'koondraport'
@@ -283,7 +283,9 @@ SEVERITY_LABEL = {
     'critical': 'Kriitiline',
     'high': 'Kõrge',
     'medium': 'Keskmine',
+    'low': 'Madal',
     'info': 'Info',
+    'none': 'Puudub',
 }
 
 UPDATE_STALE_DAYS = 30
@@ -904,7 +906,7 @@ HTML_HEAD = """<!DOCTYPE html>
             100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
         }
         .sec-jump-flash { animation: sec-jump-flash-anim 1.3s ease-out; }
-        .cve-table { font-size: .82rem; }
+        .cve-table { font-size: .82rem; table-layout: fixed; width: 100%; }
         .cve-table thead th {
             background: var(--bg); color: var(--text-muted);
             font-size: .7rem; font-weight: 600; text-transform: uppercase;
@@ -914,11 +916,18 @@ HTML_HEAD = """<!DOCTYPE html>
         .cve-table tbody td {
             padding: .55rem .6rem; vertical-align: top;
             border-bottom: 1px solid var(--border);
+            word-wrap: break-word; overflow-wrap: break-word;
         }
+        .cve-table col.cve-col-cvss    { width: 72px; }
+        .cve-table col.cve-col-sw      { width: 20%; }
+        .cve-table col.cve-col-ver     { width: 130px; }
+        .cve-table col.cve-col-hosts   { width: 150px; }
+        .cve-table col.cve-col-count   { width: 72px; }
+        .cve-table col.cve-col-samples { width: auto; }
         .cve-table .mono { font-family: 'JetBrains Mono', monospace; font-size: .78rem; }
         .cve-cpe { font-family: 'JetBrains Mono', monospace; font-size: .7rem; color: var(--text-muted); }
         .cve-sev-badge {
-            display: inline-block; min-width: 2.4rem; text-align: center;
+            display: inline-block; min-width: 3rem; text-align: center;
             padding: .25rem .55rem; border-radius: var(--r-sm);
             font-weight: 700; font-variant-numeric: tabular-nums;
             font-size: .85rem;
@@ -941,10 +950,17 @@ HTML_HEAD = """<!DOCTYPE html>
         }
         .cve-id:hover { text-decoration: underline; }
         .cve-score {
+            display: inline-flex; align-items: center; justify-content: center;
+            gap: .3rem;
+            min-width: 5.4rem;
             font-size: .7rem; font-weight: 600;
             padding: .1rem .35rem; border-radius: 4px;
-            white-space: nowrap;
+            white-space: nowrap; text-align: center;
+            font-variant-numeric: tabular-nums;
+            flex-shrink: 0;
         }
+        .cve-score .cve-score-num { min-width: 1.9rem; text-align: right; }
+        .cve-score .cve-score-sev { min-width: 3rem; text-align: left; }
         .cve-desc { font-size: .72rem; color: var(--text-muted); line-height: 1.3; }
         .cve-more { margin-top: .35rem; }
         .cve-more summary {
@@ -2160,7 +2176,10 @@ CVE_PRODUCT_MAP = [
 ]
 
 # Cache on disk so subsequent runs don't re-query identical (product, version).
-CVE_CACHE_FILE = os.path.join(UPLOAD_DIR, '.cve_cache.json')
+# Stored next to the script (not under uploads/) so that clearing uploads/
+# does not wipe the cache and subsequent scans can reuse earlier results.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CVE_CACHE_FILE = os.path.join(_SCRIPT_DIR, '.cve_cache.json')
 CVE_CACHE_TTL_SEC = 24 * 3600
 NVD_API_URL = 'https://services.nvd.nist.gov/rest/json/cves/2.0'
 NVD_USER_AGENT = f'koondraport/{__version__}'
@@ -2328,10 +2347,24 @@ def scan_fleet_for_cves(hosts, matrix, api_key):
 
     cve_findings = []
     host_cve_index = {}
-    for i, ((vendor, product, version), meta) in enumerate(sorted(triples.items())):
-        if i > 0:
+    cache_hits = 0
+    api_calls = 0
+    last_was_api = False
+    for (vendor, product, version), meta in sorted(triples.items()):
+        cache_key = f'{vendor}:{product}:{version}'
+        cached = cache.get(cache_key)
+        is_fresh = cached and cached.get('ts', 0) + CVE_CACHE_TTL_SEC > int(time.time())
+        # Only sleep before an ACTUAL network call, and only if the previous
+        # iteration also hit the network (respects NVD rate-limit between calls).
+        if not is_fresh and last_was_api:
             time.sleep(delay)
         cves = query_cves_for_cpe(vendor, product, version, api_key, cache)
+        if is_fresh:
+            cache_hits += 1
+            last_was_api = False
+        else:
+            api_calls += 1
+            last_was_api = True
         if not cves:
             continue
         worst = cves[0]
@@ -2360,6 +2393,8 @@ def scan_fleet_for_cves(hosts, matrix, api_key):
             })
 
     _save_cve_cache(cache)
+    if cache_hits or api_calls:
+        print(f"  [CVE cache: {cache_hits} hit, {api_calls} fetched from NVD]")
 
     # Sort packages by worst CVSS descending
     cve_findings.sort(key=lambda x: -(x['worst_score'] or 0.0))
@@ -2445,12 +2480,16 @@ def render_vulnerability_section(cve_findings):
         top_html = []
         for c in top:
             sc = f"{c['score']}" if c['score'] is not None else '—'
-            sev = c['severity'].upper() if c['severity'] else ''
-            sev_class = c['severity'] or 'none'
+            sev_key = c['severity'] or 'none'
+            sev = SEVERITY_LABEL.get(sev_key, sev_key.capitalize())
+            sev_class = sev_key
             top_html.append(
                 f'<div class="cve-item">'
                 f'<a href="{h(c["url"])}" target="_blank" rel="noopener" class="cve-id">{h(c["id"])}</a>'
-                f'<span class="cve-score cve-sev-{h(sev_class)}">{h(sc)} {h(sev)}</span>'
+                f'<span class="cve-score cve-sev-{h(sev_class)}">'
+                f'<span class="cve-score-num">{h(sc)}</span>'
+                f'<span class="cve-score-sev">{h(sev)}</span>'
+                f'</span>'
                 f'<span class="cve-desc">{h(c["description"][:160])}'
                 + ('…' if len(c['description']) > 160 else '')
                 + '</span></div>'
@@ -2491,13 +2530,21 @@ def render_vulnerability_section(cve_findings):
         </div>
         <div class="table-responsive">
             <table class="table cve-table">
+                <colgroup>
+                    <col class="cve-col-cvss">
+                    <col class="cve-col-sw">
+                    <col class="cve-col-ver">
+                    <col class="cve-col-hosts">
+                    <col class="cve-col-count">
+                    <col class="cve-col-samples">
+                </colgroup>
                 <thead>
                     <tr>
                         <th>Max CVSS</th>
                         <th>Tarkvara</th>
                         <th>Versioon</th>
                         <th>Hostid</th>
-                        <th>CVE-d</th>
+                        <th>CVE arv</th>
                         <th>Näited (top 3)</th>
                     </tr>
                 </thead>
