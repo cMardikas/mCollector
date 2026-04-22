@@ -19,7 +19,7 @@ import urllib.request
 from datetime import datetime, timezone
 from html import escape as h
 
-__version__ = '1.4.0'
+__version__ = '1.4.1'
 
 UPLOAD_DIR = 'uploads'
 OUTPUT_PREFIX = 'koondraport'
@@ -2173,6 +2173,65 @@ CVE_PRODUCT_MAP = [
     (r'^digidoc4\s+client\b',                    'ria',          'digidoc4_client'),
     (r'^openjdk\b|^adoptopenjdk\b',              'oracle',       'jdk'),
     (r'^(oracle\s+)?java(\s+\d+)?\b',            'oracle',       'jre'),
+    # --- v1.4.1: promoted from auto-resolve (high-frequency in enterprise fleets) ---
+    # Microsoft Office suites (2013/2016/2019/2021/365) — prefer base product,
+    # not variant CPEs like office_2013_rt. Auto-resolve confirmed this mapping.
+    # MUI / proofing / language-pack suffixes must NOT match these — use negative lookahead
+    (r'^microsoft\s+office\s+(professional|standard|home|small\s+business|365|enterprise)(?!.*\b(mui|proofing|\u00f5igekeelsusriistad)\b)', 'microsoft', 'office'),
+    (r'^microsoft\s+office\s+\d{4}(?!\s+(mui|proofing|\u00f5igekeelsusriistad))', 'microsoft', 'office'),
+    (r'^microsoft\s+365\s+apps\b',               'microsoft',    '365_apps'),
+    (r'^microsoft\s+silverlight\b',              'microsoft',    'silverlight'),
+    (r'^microsoft\s+onedrive\b',                 'microsoft',    'onedrive'),
+    (r'^microsoft\s+onenote(?!.*\bmui\b)',        'microsoft',    'onenote'),
+    (r'^microsoft\s+visio(?!.*\bmui\b)',          'microsoft',    'visio'),
+    (r'^microsoft\s+project(?!.*\bmui\b)',        'microsoft',    'project'),
+    (r'^windows\s+live\s+mail\b',                'microsoft',    'windows_live_mail'),
+    # Esri / Autodesk / design
+    (r'^arcgis\s+desktop\b',                     'esri',         'arcgis_desktop'),
+    (r'^arcgis\s+pro\b',                         'esri',         'arcgis_pro'),
+    (r'^autocad\s+lt\b',                         'autodesk',     'autocad_lt'),
+    # Skip 'AutoCAD Open in Desktop' protocol handler, 'AutoCAD Web App' etc.
+    (r'^autocad\s+\d{4}\b',                      'autodesk',     'autocad'),
+    (r'^autocad(?!\s+(open|web|share|sync|360|mobile))', 'autodesk', 'autocad'),
+    # Adobe creative
+    (r'^adobe\s+photoshop\b',                    'adobe',        'photoshop'),
+    (r'^adobe\s+illustrator\b',                  'adobe',        'illustrator'),
+    (r'^adobe\s+indesign\b',                     'adobe',        'indesign'),
+    (r'^adobe\s+premiere\s+pro\b',               'adobe',        'premiere_pro'),
+    (r'^adobe\s+after\s+effects\b',              'adobe',        'after_effects'),
+    (r'^adobe\s+lightroom\b',                    'adobe',        'lightroom'),
+    # Apple
+    (r'^itunes\b|^apple\s+itunes\b',             'apple',        'itunes'),
+    (r'^quicktime\b',                            'apple',        'quicktime'),
+    (r'^apple\s+software\s+update\b',            'apple',        'software_update'),
+    (r'^apple\s+mobile\s+device\s+support\b',    'apple',        'apple_mobile_device_support'),
+    (r'^icloud\b',                               'apple',        'icloud'),
+    # Dev / runtimes (whole products, not redistributable fragments)
+    (r'^microsoft\s+visual\s+studio\s+\d{4}\b',  'microsoft',    'visual_studio'),
+    (r'^visual\s+studio\s+code\b',               'microsoft',    'visual_studio_code'),
+    (r'^jetbrains\s+(intellij|pycharm|webstorm|rider|goland|clion|phpstorm|rubymine|datagrip)', 'jetbrains', 'intellij_idea'),
+    (r'^postgresql\b',                           'postgresql',   'postgresql'),
+    (r'^mysql\s+(server|community|workbench)\b', 'oracle',       'mysql'),
+    (r'^mariadb\b',                              'mariadb',      'mariadb'),
+    # Browsers / messaging
+    (r'^opera\b(?!.*\b(gx|mini))',               'opera',        'opera'),
+    (r'^brave\b',                                'brave',        'brave'),
+    (r'^thunderbird\b|^mozilla\s+thunderbird\b', 'mozilla',      'thunderbird'),
+    (r'^discord\b',                              'discord',      'discord'),
+    (r'^signal\b',                               'signal-messenger', 'signal-desktop'),
+    (r'^telegram\s+desktop\b|^telegram\b',       'telegram',     'telegram_desktop'),
+    # Security / backup
+    (r'^bitdefender\b',                          'bitdefender',  'antivirus'),
+    (r'^eset\s+(nod32|smart\s+security|endpoint)', 'eset',       'endpoint_security'),
+    (r'^malwarebytes\b',                         'malwarebytes', 'malwarebytes'),
+    (r'^veeam\s+(agent|backup)',                 'veeam',        'agent'),
+    # Remote / collab
+    (r'^citrix\s+workspace\b',                   'citrix',       'workspace_app'),
+    (r'^splashtop\b',                            'splashtop',    'splashtop'),
+    (r'^vmware\s+(horizon|view)\s+client',       'vmware',       'horizon_client'),
+    # Network
+    (r'^openssh\b',                              'openbsd',      'openssh'),
+    (r'^wireguard\b',                            'wireguard',    'wireguard'),
 ]
 
 # Cache on disk so subsequent runs don't re-query identical (product, version).
