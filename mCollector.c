@@ -26,7 +26,7 @@
 #include <openssl/bio.h>
 #include <openssl/bn.h>
 
-#define MCOLLECTOR_VERSION "1.3.5"
+#define MCOLLECTOR_VERSION "1.3.6"
 #define MCOLLECTOR_BUILD   __DATE__ " " __TIME__
 #define HASHES_FILE        "uploads/hashes.txt"
 #define NR_HOSTNAME        "mytt"
@@ -786,6 +786,14 @@ static void clear_uploads(void) {
     printf("[*] Cleared %d file(s) from %s/\n", count, s_upload_dir);
 }
 
+static void print_usage(const char *prog, FILE *out) {
+    fprintf(out,
+            "Usage: %s [options]\n"
+            "  -c, --clear   Clear uploads directory and exit\n"
+            "  -h, --help    Show this help\n",
+            prog);
+}
+
 int main(int argc, char **argv) {
     /* chdir to binary's directory so relative paths (index.html,
        uploads/, cert.pem) resolve correctly regardless of cwd */
@@ -806,11 +814,12 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            printf("Usage: %s [options]\n"
-                   "  -c, --clear   Clear uploads directory and exit\n"
-                   "  -h, --help    Show this help\n", argv[0]);
+            print_usage(argv[0], stdout);
             return 0;
         }
+        fprintf(stderr, "%s: unknown option '%s'\n", argv[0], argv[i]);
+        print_usage(argv[0], stderr);
+        return 2;
     }
 
     mg_log_set(MG_LL_NONE);

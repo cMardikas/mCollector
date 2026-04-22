@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone
 from html import escape as h
 
-__version__ = '1.3.5'
+__version__ = '1.3.6'
 
 UPLOAD_DIR = 'uploads'
 OUTPUT_PREFIX = 'koondraport'
