@@ -2,7 +2,8 @@
 mCollector fleet health report generator.
 
 Reads JSON host records from ./uploads/ (as written by mCollector's PowerShell
-collector + C receiver) and produces a single raport.html dashboard.
+collector + C receiver) and produces a timestamped HTML dashboard under
+./uploads/ (e.g. uploads/koondraport_2026-04-22_17-54-12.html).
 
 Stdlib only.
 """
@@ -13,10 +14,10 @@ import re
 from datetime import datetime, timezone
 from html import escape as h
 
-__version__ = '1.3.4'
+__version__ = '1.3.5'
 
 UPLOAD_DIR = 'uploads'
-OUTPUT_FILE = 'raport.html'
+OUTPUT_PREFIX = 'koondraport'
 
 EID_VENDORS = {'ria', 'thales', 'idemia'}
 EID_NAME_PATTERNS = (
@@ -1710,10 +1711,13 @@ def main():
         + HTML_FOOTER_TAIL
     )
 
-    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    output_file = os.path.join(UPLOAD_DIR, f'{OUTPUT_PREFIX}_{timestamp}.html')
+
+    with open(output_file, 'w', encoding='utf-8') as f:
         f.write(html_out)
 
-    print(f"Edukalt valmis! Loodi fail: {OUTPUT_FILE} (koondraport v{__version__})")
+    print(f"Edukalt valmis! Loodi fail: {output_file} (koondraport v{__version__})")
     print(f"  Masinaid:                 {len(hosts)}")
     print(f"  Tarkvara kokku:           {len(matrix)}")
     print(f"  Vananenud paketid:        {drift_count}")
