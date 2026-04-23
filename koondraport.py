@@ -19,7 +19,7 @@ import urllib.request
 from datetime import datetime, timezone
 from html import escape as h
 
-__version__ = '1.4.1'
+__version__ = '1.4.2'
 
 UPLOAD_DIR = 'uploads'
 OUTPUT_PREFIX = 'koondraport'
@@ -127,6 +127,60 @@ def version_tuple(v):
 
 
 # ---------------------------------------------------------------------------
+# Antivirus detection
+# ---------------------------------------------------------------------------
+
+def parse_antivirus(content):
+    """Parse the "Antivirus" block from mCollector JSON.
+
+    mCollector gets this from WMI SecurityCenter2 — it surfaces *any*
+    registered AV product (Defender, Norton, ESET, Bitdefender, Kaspersky,
+    McAfee, Sophos, CrowdStrike, Trend Micro, ...), not just Defender.
+
+    The 'productState' field is a 24-bit bitmask:
+      * bits 16-23 (byte 2): product type (0x01 = firewall, 0x02 = AV, 0x04 = AS)
+      * bits  8-15 (byte 1): enabled state  (0x10 = ON, 0x00 = OFF,
+                              0x11 = ON snoozed)
+      * bits  0-7  (byte 0): signature freshness (0x00 = up-to-date,
+                              0x10 = out-of-date)
+
+    Returns a list of dicts: [{name, enabled, up_to_date, raw_state}, ...].
+    Handles both the single-object and array forms of the Antivirus block.
+    """
+    m = re.search(r'"Antivirus"\s*:\s*(\[[^\]]*\]|\{[^\{\}]*\})', content, re.DOTALL)
+    if not m:
+        return []
+    block = m.group(1)
+    # Allow multiple objects (array) or a single object
+    entries = re.findall(r'\{[^\{\}]*\}', block, re.DOTALL)
+    if not entries:
+        entries = [block]
+    products = []
+    for entry in entries:
+        name = extract(r'"displayName"\s*:\s*"([^"]+)"', entry) or ''
+        state_str = extract(r'"productState"\s*:\s*(\d+)', entry)
+        if not state_str:
+            continue
+        try:
+            state = int(state_str)
+        except ValueError:
+            continue
+        enabled_byte = (state >> 12) & 0xF   # upper nibble of byte 1
+        freshness    = (state >> 4)  & 0xF   # upper nibble of byte 0
+        # Enabled nibble: 0x1 = ON. 0x0 = OFF. (Some products report 0x11
+        # meaning 'ON but snoozed' — we still count it as enabled.)
+        enabled = enabled_byte == 0x1
+        up_to_date = freshness == 0x0
+        products.append({
+            'name': name or 'Tundmatu AV',
+            'enabled': enabled,
+            'up_to_date': up_to_date,
+            'raw_state': state,
+        })
+    return products
+
+
+# ---------------------------------------------------------------------------
 # Load hosts
 # ---------------------------------------------------------------------------
 
@@ -150,6 +204,7 @@ def load_hosts(upload_dir):
             'user': extract(r'"Current_user"\s*:\s*"([^"]+)"', content),
             'boot': extract(r'"LastBoot"\s*:\s*"([^"]+)"', content),
             'defender': extract(r'"ProductState"\s*:\s*"([^"]+)"', content),
+            'antivirus': parse_antivirus(content),
             'responder': extract(r'"Responder"\s*:\s*"([^"]+)"', content),
             'updates_last_install': extract(
                 r'"Updates_lastInstallationSuccessDate"\s*:\s*"([^"]+)"', content),
@@ -247,11 +302,20 @@ def compute_host_metrics(host, matrix):
 
     user_clean = host['user'].split("\\")[-1] if "\\" in host['user'] else host['user']
     is_admin_user = any(a.lower() == user_clean.lower() for a in host['admins'])
-    defender_on = host['defender'] == 'On'
+    # Antivirus: any registered AV product (Defender, ESET, Bitdefender,
+    # Norton, Kaspersky, McAfee, Sophos, CrowdStrike, ...) counts.
+    # Fall back to the legacy 'Windows Defender' block if the Antivirus
+    # block is missing (older mCollector payloads).
+    av_products = host.get('antivirus') or []
+    av_active_products = [p for p in av_products if p['enabled']]
+    av_active = bool(av_active_products) or host['defender'] == 'On'
+    av_outdated = [p for p in av_active_products if not p['up_to_date']]
+    # Legacy alias kept for existing template code paths.
+    defender_on = av_active
 
     risk_points = 0
     if not host['bitlocker']:  risk_points += 2
-    if not defender_on:        risk_points += 3
+    if not av_active:          risk_points += 3
     if is_admin_user:          risk_points += 2
     if len(lagging) >= 5:      risk_points += 3
     elif len(lagging) >= 2:    risk_points += 1
@@ -268,6 +332,10 @@ def compute_host_metrics(host, matrix):
         'unique_sw': unique_sw,
         'is_admin_user': is_admin_user,
         'defender_on': defender_on,
+        'av_active': av_active,
+        'av_products': av_products,
+        'av_active_products': av_active_products,
+        'av_outdated': av_outdated,
         'health': health,
         'risk_points': risk_points,
     }
@@ -413,18 +481,38 @@ def compute_security_findings(hosts, matrix):
     now = datetime.now(timezone.utc)
     findings = []
 
-    # 1. Defender inactive (critical)
-    defender_off = [
-        {'name': h0['name'], 'detail': f"ProductState: {h0['defender']}"}
-        for h0 in hosts if not h0['metrics']['defender_on']
-    ]
-    if defender_off:
+    # 1. Antivirus inactive (critical) — Defender OR any 3rd-party AV product
+    av_off = []
+    av_stale = []
+    for h0 in hosts:
+        m = h0['metrics']
+        if not m['av_active']:
+            # List which products (if any) are registered but disabled
+            if m['av_products']:
+                product_names = ', '.join(p['name'] for p in m['av_products']) or '-'
+                detail = f"Registreeritud, kuid mitteaktiivne: {product_names}"
+            else:
+                detail = "Ei ole ühtegi aktiivset viirustrjet"
+            av_off.append({'name': h0['name'], 'detail': detail})
+        elif m['av_outdated']:
+            names = ', '.join(p['name'] for p in m['av_outdated'])
+            av_stale.append({'name': h0['name'],
+                             'detail': f"Definitsioonid vananenud: {names}"})
+    if av_off:
         findings.append({
-            'key': 'defender_off',
-            'title': 'Defender mitteaktiivne',
+            'key': 'av_off',
+            'title': 'Viirustrje mitteaktiivne',
             'severity': 'critical',
             'icon': 'shield-slash',
-            'hosts': defender_off,
+            'hosts': av_off,
+        })
+    if av_stale:
+        findings.append({
+            'key': 'av_stale',
+            'title': 'Viirustrje signatuurid vananenud',
+            'severity': 'high',
+            'icon': 'shield-exclamation',
+            'hosts': av_stale,
         })
 
     # 2. BitLocker missing (high) — user is rendered separately on every card
@@ -1760,7 +1848,8 @@ def render_security_findings(findings, hosts, matrix):
                             <span class="sf-info-pop-sub">Plokk kuvatakse ainult siis, kui vähemalt üks host vastab tingimusele.</span>
                             <ul class="sf-info-list">
                                 <li><span class="sf-pill sf-pill-critical">kriitiline</span> <b>Teadaolevad haavatavused (CVE)</b> — NVD leiab paigaldatud tarkvara versioonile CVE-d</li>
-                                <li><span class="sf-pill sf-pill-critical">kriitiline</span> <b>Defender mitteaktiivne</b> — Windows Defender reaalaja kaitse ei tööta</li>
+                                <li><span class="sf-pill sf-pill-critical">kriitiline</span> <b>Viirustrje mitteaktiivne</b> — ükski registreeritud viirustrje (Defender, Trend Micro, ESET, Bitdefender vms) ei ole aktiivne</li>
+                                <li><span class="sf-pill sf-pill-high">kõrge</span> <b>Viirustrje signatuurid vananenud</b> — aktiivse AV definitsioonid pole värsked</li>
                                 <li><span class="sf-pill sf-pill-high">kõrge</span> <b>Aktiivne kasutaja on lokaalne administraator</b> — Current_user kuulub kohalikku Administrators-gruppi</li>
                                 <li><span class="sf-pill sf-pill-high">kõrge</span> <b>BitLocker puudub</b> — C: draiv ei ole krüpteeritud</li>
                                 <li><span class="sf-pill sf-pill-medium">keskmine</span> <b>Mittestandardsed teenused vigases olekus</b> — mõni märgitud teenus pole staatuses OK</li>
@@ -1796,10 +1885,23 @@ def render_host_table(hosts, safe_ids):
                         'red': 'Vajab tähelepanu'}[m['health']]
 
         icons = []
-        if m['defender_on']:
-            icons.append('<span class="ri on" title="Defender aktiivne"><i class="bi bi-shield-check"></i></span>')
+        # Tooltip lists the active AV product(s) — Defender, Trend Micro,
+        # ESET, Bitdefender, etc. Fall back to 'Viirustrje' when product
+        # name isn't available (legacy payloads).
+        if m['av_active']:
+            if m['av_active_products']:
+                av_names = ', '.join(p['name'] for p in m['av_active_products'])
+                av_title = f"Viirustrje aktiivne: {av_names}"
+            else:
+                av_title = "Viirustrje aktiivne"
+            icons.append(f'<span class="ri on" title="{h(av_title)}"><i class="bi bi-shield-check"></i></span>')
         else:
-            icons.append('<span class="ri off" title="Defender MITTE aktiivne"><i class="bi bi-shield-slash"></i></span>')
+            if m['av_products']:
+                av_names = ', '.join(p['name'] for p in m['av_products'])
+                av_title = f"Viirustrje MITTEAKTIIVNE (registreeritud: {av_names})"
+            else:
+                av_title = "Viirustrje MITTEAKTIIVNE"
+            icons.append(f'<span class="ri off" title="{h(av_title)}"><i class="bi bi-shield-slash"></i></span>')
         if host['bitlocker']:
             icons.append('<span class="ri on" title="BitLocker aktiivne"><i class="bi bi-lock-fill"></i></span>')
         else:
