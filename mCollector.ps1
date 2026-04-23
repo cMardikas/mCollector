@@ -1,5 +1,5 @@
 #Small script to collect some windows data.
-#Version 1.3.8
+#Version 1.3.9
 
 try{
 	#Allow running unsigned scripts as current user
@@ -40,7 +40,50 @@ $lastSearchSuccessDate     = Get-Date((New-Object -Com "Microsoft.Update.AutoUpd
 $lastInstallationSuccessDate     = Get-Date((New-Object -Com "Microsoft.Update.AutoUpdate").Results | Select -ExpandProperty "LastInstallationSuccessDate") -Format "dd.MM.yyyy"
 $installedWindowsUpdates  = Get-CimInstance -ClassName Win32_QuickFixEngineering | sort installedon -des | Select-Object -Property HotFixID, InstalledOn
 Write-Host "Collecting installed software."
-$installedSoftware = Get-CimInstance -ClassName Win32_Product | Select Vendor,Name,Version,InstallDate | sort InstallDate -des
+# NB: Win32_Product returns only MSI-installed products and triggers an MSI
+# consistency check on every package - Microsoft advises against using it.
+# We read the three Windows "Uninstall" registry hives instead, which is
+# what Apps & Features / appwiz.cpl itself uses. This surfaces EXE-installed
+# apps (Chrome, Firefox, Teams, Zoom, Discord, Slack, 7-Zip, Notepad++,
+# VS Code, Git, Node.js, AnyDesk, ...) and per-user installs that
+# Win32_Product silently omits.
+$uninstallPaths = @(
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+)
+$rawInstalled = foreach ($p in $uninstallPaths) {
+    Get-ItemProperty -Path $p -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.DisplayName -and
+            -not $_.SystemComponent -and
+            -not $_.ParentKeyName -and
+            ($_.WindowsInstaller -ne 1 -or $_.DisplayVersion)
+        } |
+        ForEach-Object {
+            # Normalise InstallDate (registry stores YYYYMMDD) to dd.MM.yyyy
+            $instDate = $null
+            if ($_.InstallDate -and $_.InstallDate -match '^\d{8}$') {
+                try {
+                    $instDate = [datetime]::ParseExact(
+                        $_.InstallDate, 'yyyyMMdd',
+                        [System.Globalization.CultureInfo]::InvariantCulture
+                    ).ToString('dd.MM.yyyy')
+                } catch { $instDate = $_.InstallDate }
+            }
+            [PSCustomObject]@{
+                Vendor      = $_.Publisher
+                Name        = $_.DisplayName
+                Version     = $_.DisplayVersion
+                InstallDate = $instDate
+            }
+        }
+}
+# De-duplicate across the three hives (same app can appear in HKLM + HKCU
+# or under both WOW6432Node and the native hive). Key = Name + Version.
+$installedSoftware = $rawInstalled |
+    Sort-Object -Property Name, Version -Unique |
+    Sort-Object -Property @{ Expression = { $_.InstallDate }; Descending = $true }, Name
 Write-Host "Collecting network configuration."
 $ipConfig = Get-NetAdapter | Get-NetIPAddress  -Erroraction silentlycontinue |  Select ifIndex, InterfaceAlias, AddressFamily, IPv4Address, IPv6Address, PrefixLength
 $routingTable = Get-NetRoute -AddressFamily IPv4 -State Alive | Select InterfaceIndex, InterfaceAlias,DestinationPrefix, NextHop, RouteMetric
