@@ -1,5 +1,5 @@
 #Small script to collect some windows data.
-#Version 1.3.9
+#Version 1.4.0
 
 try{
 	#Allow running unsigned scripts as current user
@@ -52,32 +52,94 @@ $uninstallPaths = @(
     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
     'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
 )
+# Add a P/Invoke wrapper for RegQueryInfoKey once (for the LastWriteTime
+# fallback below). The PowerShell registry provider doesn't expose the
+# subkey's own LastWriteTime, so we have to go through advapi32 directly.
+if (-not ('mCollector.RegKey' -as [type])) {
+    Add-Type -Namespace mCollector -Name RegKey -UsingNamespace System.Text -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("advapi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern int RegQueryInfoKey(
+    Microsoft.Win32.SafeHandles.SafeRegistryHandle hKey,
+    System.Text.StringBuilder lpClass,
+    System.IntPtr lpcbClass,
+    System.IntPtr lpReserved,
+    System.IntPtr lpcSubKeys,
+    System.IntPtr lpcbMaxSubKeyLen,
+    System.IntPtr lpcbMaxClassLen,
+    System.IntPtr lpcValues,
+    System.IntPtr lpcbMaxValueNameLen,
+    System.IntPtr lpcbMaxValueLen,
+    System.IntPtr lpcbSecurityDescriptor,
+    out long lpftLastWriteTime);
+'@
+}
+
+function Get-RegKeyLastWriteTime {
+    param([Microsoft.Win32.RegistryKey]$Key)
+    try {
+        [long]$ft = 0
+        $rc = [mCollector.RegKey]::RegQueryInfoKey(
+            $Key.Handle, $null,
+            [IntPtr]::Zero, [IntPtr]::Zero, [IntPtr]::Zero,
+            [IntPtr]::Zero, [IntPtr]::Zero, [IntPtr]::Zero, [IntPtr]::Zero,
+            [IntPtr]::Zero, [IntPtr]::Zero, [ref]$ft)
+        if ($rc -eq 0 -and $ft -gt 0) { return [datetime]::FromFileTime($ft) }
+    } catch { }
+    return $null
+}
+
 $rawInstalled = foreach ($p in $uninstallPaths) {
-    Get-ItemProperty -Path $p -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.DisplayName -and
-            -not $_.SystemComponent -and
-            -not $_.ParentKeyName -and
-            ($_.WindowsInstaller -ne 1 -or $_.DisplayVersion)
-        } |
-        ForEach-Object {
-            # Normalise InstallDate (registry stores YYYYMMDD) to dd.MM.yyyy
+    # Split 'HKLM:\...\Uninstall\*' into parent path so we can enumerate subkeys.
+    $parent = Split-Path $p
+    $parentKey = $null
+    if ($parent -like 'HKLM:*') {
+        $parentKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($parent.Substring(6))
+    } elseif ($parent -like 'HKCU:*') {
+        $parentKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($parent.Substring(6))
+    }
+    if (-not $parentKey) { continue }
+
+    foreach ($subName in $parentKey.GetSubKeyNames()) {
+        $subKey = $parentKey.OpenSubKey($subName)
+        if (-not $subKey) { continue }
+        try {
+            $DisplayName      = $subKey.GetValue('DisplayName')
+            if (-not $DisplayName) { continue }
+            if ($subKey.GetValue('SystemComponent')) { continue }
+            if ($subKey.GetValue('ParentKeyName'))   { continue }
+            $DisplayVersion   = $subKey.GetValue('DisplayVersion')
+            if ($subKey.GetValue('WindowsInstaller') -eq 1 -and -not $DisplayVersion) { continue }
+            $Publisher        = $subKey.GetValue('Publisher')
+            $RegInstallDate   = $subKey.GetValue('InstallDate')
+
+            # Fallback chain for InstallDate:
+            #  1) registry 'InstallDate' value (YYYYMMDD REG_SZ) if installer wrote it
+            #  2) the subkey's own LastWriteTime (what Apps & Features falls back to)
             $instDate = $null
-            if ($_.InstallDate -and $_.InstallDate -match '^\d{8}$') {
+            if ($RegInstallDate -and $RegInstallDate -match '^\d{8}$') {
                 try {
                     $instDate = [datetime]::ParseExact(
-                        $_.InstallDate, 'yyyyMMdd',
+                        $RegInstallDate, 'yyyyMMdd',
                         [System.Globalization.CultureInfo]::InvariantCulture
                     ).ToString('dd.MM.yyyy')
-                } catch { $instDate = $_.InstallDate }
+                } catch { $instDate = $RegInstallDate }
             }
+            if (-not $instDate) {
+                $lwt = Get-RegKeyLastWriteTime -Key $subKey
+                if ($lwt) { $instDate = $lwt.ToString('dd.MM.yyyy') }
+            }
+
             [PSCustomObject]@{
-                Vendor      = $_.Publisher
-                Name        = $_.DisplayName
-                Version     = $_.DisplayVersion
+                Vendor      = $Publisher
+                Name        = $DisplayName
+                Version     = $DisplayVersion
                 InstallDate = $instDate
             }
+        } finally {
+            $subKey.Close()
         }
+    }
+    $parentKey.Close()
 }
 # De-duplicate across the three hives (same app can appear in HKLM + HKCU
 # or under both WOW6432Node and the native hive). Key = Name + Version.
