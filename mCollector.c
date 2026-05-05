@@ -872,6 +872,10 @@ static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
                 fname += start;
                 flen  -= start;
                 if (flen == 0 || fname[0] == '.') { skipped++; continue; }
+                /* cap filename length so the assembled path[512] cannot be
+                   silently truncated by snprintf below (NAME_MAX = 255 on
+                   typical Linux filesystems). */
+                if (flen > 255) { skipped++; continue; }
                 bool bad = false;
                 for (size_t k = 0; k < flen; k++) {
                     char ch = fname[k];
