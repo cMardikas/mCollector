@@ -28,12 +28,12 @@
 #include <openssl/bio.h>
 #include <openssl/bn.h>
 
-#define MCOLLECTOR_VERSION "1.4.4"
+#define MCOLLECTOR_VERSION "1.4.5"
 #define MCOLLECTOR_BUILD   __DATE__ " " __TIME__
 #define HASHES_FILE        "uploads/hashes.txt"
 #define NR_HOSTNAME        "mytt"
 
-static const char *s_web_root   = ".";
+static const char *s_public_dir = "public";
 static const char *s_upload_dir = "uploads";
 static int generate_tls_keypair(char **out_cert_pem, char **out_key_pem) {
     EVP_PKEY *pkey = NULL;
@@ -832,6 +832,37 @@ static bool method_is(struct mg_http_message *hm, const char *m) {
     return mg_match(hm->method, mg_str(m), NULL);
 }
 
+/* Validate a request URI before mapping it to a file inside public/.
+   The path component (everything after the leading '/') must:
+     - be non-empty
+     - not be absolute or contain backslashes
+     - have no '.' or '..' segments (rejects "..", "./", "foo/../bar", etc.)
+     - have no segment beginning with '.' (no hidden dotfiles)
+     - contain no NUL or control characters
+     - not end in '/' (directory listings are not exposed)
+   Mongoose decodes percent-encoding into hm->uri before we see it, so
+   "%2e%2e" arrives as "..". Returns true if safe, false otherwise. */
+static bool public_uri_is_safe(struct mg_str uri) {
+    if (uri.len < 2 || uri.buf[0] != '/') return false;
+    const char *p = uri.buf + 1;
+    size_t n = uri.len - 1;
+    if (n == 0) return false;
+    if (p[n - 1] == '/') return false;       /* no directory requests */
+    size_t seg_start = 0;
+    for (size_t i = 0; i <= n; i++) {
+        char ch = (i < n) ? p[i] : '/';      /* sentinel terminator */
+        if (ch == '\0' || (unsigned char)ch < 0x20) return false;
+        if (ch == '\\') return false;
+        if (ch == '/') {
+            size_t seg_len = i - seg_start;
+            if (seg_len == 0) return false;  /* empty segment ("//") */
+            if (p[seg_start] == '.') return false; /* ".", "..", ".hidden" */
+            seg_start = i + 1;
+        }
+    }
+    return true;
+}
+
 static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
     if (ev == MG_EV_ACCEPT) {
         struct mg_tls_opts opts = {0};
@@ -840,8 +871,6 @@ static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
         mg_tls_init(c, &opts);
     } else if (ev == MG_EV_HTTP_MSG) {
         struct mg_http_message *hm = (struct mg_http_message *)ev_data;
-        struct mg_http_serve_opts sopts = {0};
-        sopts.root_dir = s_web_root;
 
         if (uri_equals(hm->uri, "/upload")) {
             if (!method_is(hm, "POST")) {
@@ -936,20 +965,6 @@ static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
                            "text/plain; charset=utf-8");
             return;
         }
-        if (uri_equals(hm->uri, "/PingCastle.exe")) {
-            if (!method_is(hm, "GET") && !method_is(hm, "HEAD")) {
-                mg_http_reply(c, 405, "Allow: GET, HEAD\r\n",
-                              "Method Not Allowed\n");
-                return;
-            }
-            /* Plain mg_http_serve_file — same call shape as v1.4.2. The
-               built-in mime table maps .exe to application/octet-stream,
-               and Mongoose handles HEAD, Range, Etag, and async streaming
-               internally. Do NOT add Content-Disposition or Connection:
-               close here: that broke Edge's HEAD→GET pre-flight in PR #9. */
-            mg_http_serve_file(c, hm, "PingCastle.exe", &sopts);
-            return;
-        }
         if (uri_equals(hm->uri, "/")) {
             if (!method_is(hm, "GET") && !method_is(hm, "HEAD")) {
                 mg_http_reply(c, 405, "Allow: GET, HEAD\r\n",
@@ -960,7 +975,40 @@ static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
                            "text/html; charset=utf-8");
             return;
         }
-        mg_http_reply(c, 301, "Location: /\r\n", "");
+
+        /* Anything else maps to a static file inside public/.
+           URLs do NOT include "/public/": "/foo.zip" -> "public/foo.zip". */
+        if (!method_is(hm, "GET") && !method_is(hm, "HEAD")) {
+            mg_http_reply(c, 405, "Allow: GET, HEAD\r\n",
+                          "Method Not Allowed\n");
+            return;
+        }
+        if (!public_uri_is_safe(hm->uri)) {
+            mg_http_reply(c, 404, "Connection: close\r\n", "Not Found\n");
+            c->is_draining = 1;
+            return;
+        }
+        char path[1024];
+        int wrote = snprintf(path, sizeof(path), "%s%.*s",
+                             s_public_dir, (int)hm->uri.len, hm->uri.buf);
+        if (wrote <= 0 || (size_t)wrote >= sizeof(path)) {
+            mg_http_reply(c, 404, "Connection: close\r\n", "Not Found\n");
+            c->is_draining = 1;
+            return;
+        }
+        struct stat st;
+        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+            mg_http_reply(c, 404, "", "Not Found\n");
+            return;
+        }
+        /* Plain mg_http_serve_file — Mongoose's built-in mime table handles
+           common types (.exe -> application/octet-stream), and it handles
+           HEAD, Range, Etag, and async streaming internally. Do NOT add
+           Content-Disposition or Connection: close: that broke Edge's
+           HEAD->GET pre-flight in PR #9. */
+        struct mg_http_serve_opts sopts = {0};
+        sopts.root_dir = s_public_dir;
+        mg_http_serve_file(c, hm, path, &sopts);
     }
 }
 

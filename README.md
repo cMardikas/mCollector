@@ -137,9 +137,16 @@ john --format=netntlmv2 uploads/hashes.txt --wordlist=wordlist.txt
 |----------|-------------|
 | `https://<ip>/` | Upload page + copy-paste commands |
 | `https://<ip>/mCollector.ps1` | PowerShell collection script |
-| `https://<ip>/PingCastle.exe` | PingCastle binary |
+| `https://<ip>/<filename>` | Static download from `public/` (e.g. `/PingCastle.exe`) |
 | `POST https://<ip>/upload` | File upload (multipart) |
-| `https://<ip>/uploads/` | Browse uploaded files |
+
+Place anything you want to be downloadable in a `public/` directory next to
+the `mCollector` binary. The URL never includes `/public/`: `/PingCastle.exe`
+serves `public/PingCastle.exe`. Files outside `public/` are not exposed —
+source, certs, uploads, and the binary itself stay private. Path traversal,
+absolute paths, backslashes, hidden dotfiles, and directory requests are
+rejected with 404. Create the directory with `mkdir public` and drop files
+in (e.g. `cp PingCastle.exe public/`).
 
 ## Triggering Hash Capture from Windows
 
