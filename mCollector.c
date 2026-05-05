@@ -911,11 +911,14 @@ static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
             }
             if (err) {
                 mg_http_reply(c, err_status, "Connection: close\r\n", "%s", err);
+                c->is_draining = 1;
             } else {
-                mg_http_reply(c, 200, "Connection: close\r\n",
+                /* Keep-alive on success: Connection: close + is_draining here
+                   broke Edge's subsequent download (HEAD pre-flight on the
+                   reused TLS conn would race with our drain). Matches v1.4.2. */
+                mg_http_reply(c, 200, "",
                               "Uploaded %d file(s), skipped %d\n", saved, skipped);
             }
-            c->is_draining = 1;
             return;
         }
 
