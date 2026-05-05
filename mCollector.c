@@ -7,6 +7,7 @@
 
 #include "mongoose.h"
 #include "nameresolver.h"
+#include "embedded_assets.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -653,6 +654,82 @@ static int uri_equals(struct mg_str s, const char *cstr) {
     return s.len == strlen(cstr) && memcmp(s.buf, cstr, s.len) == 0;
 }
 
+/* Pick the local IPv4 address of the adapter the client connected through.
+   Falls back to the first non-loopback IPv4 if c->loc is unavailable. */
+static void get_active_adapter_ip(struct mg_connection *c, char *out, size_t outsz) {
+    out[0] = '\0';
+    if (c && c->loc.is_ip6 == 0 && c->loc.ip4 != 0) {
+        struct in_addr a; a.s_addr = c->loc.ip4;
+        char s[INET_ADDRSTRLEN] = {0};
+        if (inet_ntop(AF_INET, &a, s, sizeof(s)) &&
+            strncmp(s, "0.", 2) != 0 && strncmp(s, "127.", 4) != 0) {
+            snprintf(out, outsz, "%s", s);
+            return;
+        }
+    }
+    struct ifaddrs *ifaddr, *ifa;
+    if (getifaddrs(&ifaddr)) return;
+    for (ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+        struct sockaddr_in *a = (struct sockaddr_in *)ifa->ifa_addr;
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &a->sin_addr, ip, sizeof(ip));
+        if (!strncmp(ip, "127.", 4)) continue;
+        snprintf(out, outsz, "%s", ip);
+        break;
+    }
+    freeifaddrs(ifaddr);
+}
+
+/* Replace every "{{SERVER_IP}}" in `in` (length `in_len`) with `ip`.
+   Returns a freshly malloc'd buffer; caller must free. *out_len is the
+   resulting length. Returns NULL on allocation failure. */
+static char *substitute_server_ip(const unsigned char *in, size_t in_len,
+                                  const char *ip, size_t *out_len) {
+    static const char marker[] = "{{SERVER_IP}}";
+    const size_t mlen = sizeof(marker) - 1;
+    size_t iplen = strlen(ip);
+    size_t count = 0;
+    for (size_t i = 0; i + mlen <= in_len; i++) {
+        if (memcmp(in + i, marker, mlen) == 0) { count++; i += mlen - 1; }
+    }
+    size_t cap = in_len + count * (iplen > mlen ? (iplen - mlen) : 0) + 1;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < in_len; ) {
+        if (i + mlen <= in_len && memcmp(in + i, marker, mlen) == 0) {
+            memcpy(buf + o, ip, iplen); o += iplen; i += mlen;
+        } else {
+            buf[o++] = (char)in[i++];
+        }
+    }
+    buf[o] = '\0';
+    *out_len = o;
+    return buf;
+}
+
+static void serve_embedded(struct mg_connection *c,
+                           const unsigned char *data, size_t len,
+                           const char *content_type) {
+    char ip[64];
+    get_active_adapter_ip(c, ip, sizeof(ip));
+    if (!ip[0]) snprintf(ip, sizeof(ip), "127.0.0.1");
+    size_t out_len = 0;
+    char *body = substitute_server_ip(data, len, ip, &out_len);
+    if (!body) { mg_http_reply(c, 500, "", "alloc failed\n"); return; }
+    mg_printf(c,
+              "HTTP/1.1 200 OK\r\n"
+              "Content-Type: %s\r\n"
+              "Content-Length: %lu\r\n"
+              "Connection: close\r\n"
+              "\r\n",
+              content_type, (unsigned long)out_len);
+    mg_send(c, body, out_len);
+    c->is_resp = 0;
+    free(body);
+}
+
 static void handle_redirect(struct mg_connection *c, int ev, void *ev_data) {
     if (ev == MG_EV_HTTP_MSG) {
         struct mg_http_message *hm = (struct mg_http_message *)ev_data;
@@ -728,12 +805,18 @@ static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
         }
 
         /* /uploads/ route removed — was exposing sensitive data without auth */
-        if (uri_equals(hm->uri, "/mCollector.ps1"))
-            { mg_http_serve_file(c, hm, "mCollector.ps1", &sopts); return; }
+        if (uri_equals(hm->uri, "/mCollector.ps1")) {
+            serve_embedded(c, mCollector_ps1, mCollector_ps1_len,
+                           "application/octet-stream");
+            return;
+        }
         if (uri_equals(hm->uri, "/PingCastle.exe"))
             { mg_http_serve_file(c, hm, "PingCastle.exe", &sopts); return; }
-        if (uri_equals(hm->uri, "/"))
-            { mg_http_serve_file(c, hm, "index.html", &sopts); return; }
+        if (uri_equals(hm->uri, "/")) {
+            serve_embedded(c, index_html, index_html_len,
+                           "text/html; charset=utf-8");
+            return;
+        }
         mg_http_reply(c, 301, "Location: /\r\n", "");
     }
 }
