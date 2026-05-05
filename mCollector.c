@@ -736,6 +736,7 @@ static void serve_embedded(struct mg_connection *c,
               content_type, (unsigned long)out_len, disp);
     mg_send(c, body, out_len);
     c->is_resp = 0;
+    c->is_draining = 1;
     free(body);
 }
 
@@ -819,8 +820,17 @@ static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
                            "application/octet-stream", "mCollector.ps1");
             return;
         }
-        if (uri_equals(hm->uri, "/PingCastle.exe"))
-            { mg_http_serve_file(c, hm, "PingCastle.exe", &sopts); return; }
+        if (uri_equals(hm->uri, "/PingCastle.exe")) {
+            sopts.mime_types = "exe=application/octet-stream";
+            sopts.extra_headers =
+                "Content-Disposition: attachment; "
+                "filename=\"PingCastle.exe\"\r\n"
+                "Cache-Control: no-store\r\n"
+                "Connection: close\r\n";
+            mg_http_serve_file(c, hm, "PingCastle.exe", &sopts);
+            c->is_draining = 1;
+            return;
+        }
         if (uri_equals(hm->uri, "/")) {
             serve_embedded(c, index_html, index_html_len,
                            "text/html; charset=utf-8", NULL);
