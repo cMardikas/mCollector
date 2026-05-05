@@ -750,59 +750,60 @@ static char *substitute_server_ip(const unsigned char *in, size_t in_len,
     return buf;
 }
 
-/* Validate a static download filename: ASCII letters, digits, dot, underscore,
-   dash only. Refuses anything that would need quoting or could break the
-   Content-Disposition header. Caller passes only compile-time string literals,
-   but we double-check to keep the header safe. */
-static bool is_safe_download_filename(const char *s) {
-    if (!s || !*s) return false;
-    for (const char *p = s; *p; p++) {
-        char ch = *p;
-        bool ok = (ch >= 'a' && ch <= 'z') ||
-                  (ch >= 'A' && ch <= 'Z') ||
-                  (ch >= '0' && ch <= '9') ||
-                  ch == '.' || ch == '_' || ch == '-';
-        if (!ok) return false;
-    }
-    return true;
-}
-
+/* Serve an in-memory payload with wire behavior matching v1.4.2's
+   mg_http_serve_file: emits Content-Type, Etag, Content-Length and (for GET)
+   the body, but emits headers only on HEAD. No Content-Disposition,
+   Cache-Control, or Connection: close — Edge's pre-flight HEAD followed by
+   GET only behaves correctly when framing matches the file-serve path. */
 static void serve_embedded(struct mg_connection *c,
+                           struct mg_http_message *hm,
                            const unsigned char *data, size_t len,
-                           const char *content_type,
-                           const char *download_filename) {
+                           const char *content_type) {
     char ip[64];
     if (!get_active_adapter_ip(c, ip, sizeof(ip))) {
-        mg_http_reply(c, 500, "Connection: close\r\n",
+        mg_http_reply(c, 500, "",
                       "No usable non-loopback IPv4 address found on this host.\n");
-        c->is_draining = 1;
         return;
     }
     size_t out_len = 0;
     char *body = substitute_server_ip(data, len, ip, &out_len);
     if (!body) {
-        mg_http_reply(c, 500, "Connection: close\r\n", "alloc failed\n");
-        c->is_draining = 1;
+        mg_http_reply(c, 500, "", "alloc failed\n");
         return;
     }
-    char disp[128] = "";
-    if (download_filename && is_safe_download_filename(download_filename)) {
-        snprintf(disp, sizeof(disp),
-                 "Content-Disposition: attachment; filename=\"%s\"\r\n",
-                 download_filename);
+
+    /* Etag derived from body length — embedded payloads stay constant per
+       binary, so length is a stable cache key. */
+    char etag[64];
+    snprintf(etag, sizeof(etag), "\"e-%lu\"", (unsigned long)out_len);
+
+    struct mg_str *inm = mg_http_get_header(hm, "If-None-Match");
+    if (inm && inm->len == strlen(etag) &&
+        memcmp(inm->buf, etag, inm->len) == 0) {
+        mg_printf(c,
+                  "HTTP/1.1 304 Not Modified\r\n"
+                  "Etag: %s\r\n"
+                  "Content-Length: 0\r\n"
+                  "\r\n",
+                  etag);
+        c->is_resp = 0;
+        free(body);
+        return;
     }
+
+    bool is_head = mg_strcasecmp(hm->method, mg_str("HEAD")) == 0;
+
     mg_printf(c,
               "HTTP/1.1 200 OK\r\n"
               "Content-Type: %s\r\n"
+              "Etag: %s\r\n"
               "Content-Length: %lu\r\n"
-              "%s"
-              "Cache-Control: no-store\r\n"
-              "Connection: close\r\n"
               "\r\n",
-              content_type, (unsigned long)out_len, disp);
-    mg_send(c, body, out_len);
+              content_type, etag, (unsigned long)out_len);
+    if (!is_head) {
+        mg_send(c, body, out_len);
+    }
     c->is_resp = 0;
-    c->is_draining = 1;
     free(body);
 }
 
@@ -921,47 +922,42 @@ static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
         /* /uploads/ route removed — was exposing sensitive data without auth */
         if (uri_equals(hm->uri, "/mCollector.ps1")) {
             if (!method_is(hm, "GET") && !method_is(hm, "HEAD")) {
-                mg_http_reply(c, 405, "Allow: GET, HEAD\r\nConnection: close\r\n",
+                mg_http_reply(c, 405, "Allow: GET, HEAD\r\n",
                               "Method Not Allowed\n");
-                c->is_draining = 1;
                 return;
             }
-            serve_embedded(c, mCollector_ps1, mCollector_ps1_len,
-                           "application/octet-stream", "mCollector.ps1");
+            /* Match v1.4.2 wire behavior exactly: mg_http_serve_file on a
+               .ps1 file with no extension override falls through to the
+               default "text/plain; charset=utf-8" mime. */
+            serve_embedded(c, hm, mCollector_ps1, mCollector_ps1_len,
+                           "text/plain; charset=utf-8");
             return;
         }
         if (uri_equals(hm->uri, "/PingCastle.exe")) {
             if (!method_is(hm, "GET") && !method_is(hm, "HEAD")) {
-                mg_http_reply(c, 405, "Allow: GET, HEAD\r\nConnection: close\r\n",
+                mg_http_reply(c, 405, "Allow: GET, HEAD\r\n",
                               "Method Not Allowed\n");
-                c->is_draining = 1;
                 return;
             }
-            sopts.mime_types = "exe=application/octet-stream";
-            sopts.extra_headers =
-                "Content-Disposition: attachment; "
-                "filename=\"PingCastle.exe\"\r\n"
-                "Cache-Control: no-store\r\n";
-            /* Do NOT set is_draining here: mg_http_serve_file streams the
-               body asynchronously across multiple poll iterations, and
-               draining mid-stream truncates downloads. Mongoose closes the
-               connection itself when the file body is fully sent. */
+            /* Plain mg_http_serve_file — same call shape as v1.4.2. The
+               built-in mime table maps .exe to application/octet-stream,
+               and Mongoose handles HEAD, Range, Etag, and async streaming
+               internally. Do NOT add Content-Disposition or Connection:
+               close here: that broke Edge's HEAD→GET pre-flight in PR #9. */
             mg_http_serve_file(c, hm, "PingCastle.exe", &sopts);
             return;
         }
         if (uri_equals(hm->uri, "/")) {
             if (!method_is(hm, "GET") && !method_is(hm, "HEAD")) {
-                mg_http_reply(c, 405, "Allow: GET, HEAD\r\nConnection: close\r\n",
+                mg_http_reply(c, 405, "Allow: GET, HEAD\r\n",
                               "Method Not Allowed\n");
-                c->is_draining = 1;
                 return;
             }
-            serve_embedded(c, index_html, index_html_len,
-                           "text/html; charset=utf-8", NULL);
+            serve_embedded(c, hm, index_html, index_html_len,
+                           "text/html; charset=utf-8");
             return;
         }
-        mg_http_reply(c, 301, "Location: /\r\nConnection: close\r\n", "");
-        c->is_draining = 1;
+        mg_http_reply(c, 301, "Location: /\r\n", "");
     }
 }
 
