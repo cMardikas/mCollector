@@ -7,6 +7,7 @@
 
 #include "mongoose.h"
 #include "nameresolver.h"
+#include "embedded_assets.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +15,7 @@
 #include <ifaddrs.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <stdbool.h>
 #include <dirent.h>
@@ -26,7 +28,7 @@
 #include <openssl/bio.h>
 #include <openssl/bn.h>
 
-#define MCOLLECTOR_VERSION "1.3.8"
+#define MCOLLECTOR_VERSION "1.4.3"
 #define MCOLLECTOR_BUILD   __DATE__ " " __TIME__
 #define HASHES_FILE        "uploads/hashes.txt"
 #define NR_HOSTNAME        "mytt"
@@ -653,6 +655,158 @@ static int uri_equals(struct mg_str s, const char *cstr) {
     return s.len == strlen(cstr) && memcmp(s.buf, cstr, s.len) == 0;
 }
 
+/* Validate that `s` is a dotted-quad IPv4 address (suitable for embedding into
+   a PowerShell URL). Returns true only for canonical "A.B.C.D" with each octet
+   in 0..255 — refuses anything inet_pton accepts via legacy parsings. */
+static bool is_dotted_quad_ipv4(const char *s) {
+    if (!s || !*s) return false;
+    int dots = 0, octet = 0, digits = 0;
+    for (const char *p = s; ; p++) {
+        if (*p >= '0' && *p <= '9') {
+            if (++digits > 3) return false;
+            octet = octet * 10 + (*p - '0');
+            if (octet > 255) return false;
+        } else if (*p == '.' || *p == '\0') {
+            if (digits == 0) return false;
+            if (*p == '.') {
+                if (++dots > 3) return false;
+                octet = 0; digits = 0;
+            } else {
+                return dots == 3;
+            }
+        } else {
+            return false;
+        }
+    }
+}
+
+/* Pick the local IPv4 address of the adapter the client connected through.
+   Uses getsockname() on the accepted socket (c->loc is the listener's addr,
+   which is 0.0.0.0 for wildcard binds). Falls back to the first non-loopback
+   IPv4 from getifaddrs only if getsockname yields a wildcard/loopback.
+   Returns true on success, false if no usable non-loopback IPv4 found. */
+static bool get_active_adapter_ip(struct mg_connection *c, char *out, size_t outsz) {
+    out[0] = '\0';
+    if (c && c->fd) {
+        struct sockaddr_storage ss;
+        socklen_t sl = sizeof(ss);
+        if (getsockname((int)(size_t)c->fd, (struct sockaddr *)&ss, &sl) == 0 &&
+            ss.ss_family == AF_INET) {
+            struct sockaddr_in *sin = (struct sockaddr_in *)&ss;
+            char s[INET_ADDRSTRLEN] = {0};
+            if (inet_ntop(AF_INET, &sin->sin_addr, s, sizeof(s)) &&
+                is_dotted_quad_ipv4(s) &&
+                sin->sin_addr.s_addr != htonl(INADDR_ANY) &&
+                strncmp(s, "127.", 4) != 0) {
+                snprintf(out, outsz, "%s", s);
+                return true;
+            }
+        }
+    }
+    struct ifaddrs *ifaddr, *ifa;
+    if (getifaddrs(&ifaddr)) return false;
+    bool found = false;
+    for (ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+        struct sockaddr_in *a = (struct sockaddr_in *)ifa->ifa_addr;
+        char ip[INET_ADDRSTRLEN];
+        if (!inet_ntop(AF_INET, &a->sin_addr, ip, sizeof(ip))) continue;
+        if (!is_dotted_quad_ipv4(ip)) continue;
+        if (!strncmp(ip, "127.", 4)) continue;
+        if (a->sin_addr.s_addr == htonl(INADDR_ANY)) continue;
+        snprintf(out, outsz, "%s", ip);
+        found = true;
+        break;
+    }
+    freeifaddrs(ifaddr);
+    return found;
+}
+
+/* Replace every "{{SERVER_IP}}" in `in` (length `in_len`) with `ip`.
+   Returns a freshly malloc'd buffer; caller must free. *out_len is the
+   resulting length. Returns NULL on allocation failure. */
+static char *substitute_server_ip(const unsigned char *in, size_t in_len,
+                                  const char *ip, size_t *out_len) {
+    static const char marker[] = "{{SERVER_IP}}";
+    const size_t mlen = sizeof(marker) - 1;
+    size_t iplen = strlen(ip);
+    size_t count = 0;
+    for (size_t i = 0; i + mlen <= in_len; i++) {
+        if (memcmp(in + i, marker, mlen) == 0) { count++; i += mlen - 1; }
+    }
+    size_t cap = in_len + count * (iplen > mlen ? (iplen - mlen) : 0) + 1;
+    char *buf = malloc(cap);
+    if (!buf) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < in_len; ) {
+        if (i + mlen <= in_len && memcmp(in + i, marker, mlen) == 0) {
+            memcpy(buf + o, ip, iplen); o += iplen; i += mlen;
+        } else {
+            buf[o++] = (char)in[i++];
+        }
+    }
+    buf[o] = '\0';
+    *out_len = o;
+    return buf;
+}
+
+/* Serve an in-memory payload with wire behavior matching v1.4.2's
+   mg_http_serve_file: emits Content-Type, Etag, Content-Length and (for GET)
+   the body, but emits headers only on HEAD. No Content-Disposition,
+   Cache-Control, or Connection: close — Edge's pre-flight HEAD followed by
+   GET only behaves correctly when framing matches the file-serve path. */
+static void serve_embedded(struct mg_connection *c,
+                           struct mg_http_message *hm,
+                           const unsigned char *data, size_t len,
+                           const char *content_type) {
+    char ip[64];
+    if (!get_active_adapter_ip(c, ip, sizeof(ip))) {
+        mg_http_reply(c, 500, "",
+                      "No usable non-loopback IPv4 address found on this host.\n");
+        return;
+    }
+    size_t out_len = 0;
+    char *body = substitute_server_ip(data, len, ip, &out_len);
+    if (!body) {
+        mg_http_reply(c, 500, "", "alloc failed\n");
+        return;
+    }
+
+    /* Etag derived from body length — embedded payloads stay constant per
+       binary, so length is a stable cache key. */
+    char etag[64];
+    snprintf(etag, sizeof(etag), "\"e-%lu\"", (unsigned long)out_len);
+
+    struct mg_str *inm = mg_http_get_header(hm, "If-None-Match");
+    if (inm && inm->len == strlen(etag) &&
+        memcmp(inm->buf, etag, inm->len) == 0) {
+        mg_printf(c,
+                  "HTTP/1.1 304 Not Modified\r\n"
+                  "Etag: %s\r\n"
+                  "Content-Length: 0\r\n"
+                  "\r\n",
+                  etag);
+        c->is_resp = 0;
+        free(body);
+        return;
+    }
+
+    bool is_head = mg_strcasecmp(hm->method, mg_str("HEAD")) == 0;
+
+    mg_printf(c,
+              "HTTP/1.1 200 OK\r\n"
+              "Content-Type: %s\r\n"
+              "Etag: %s\r\n"
+              "Content-Length: %lu\r\n"
+              "\r\n",
+              content_type, etag, (unsigned long)out_len);
+    if (!is_head) {
+        mg_send(c, body, out_len);
+    }
+    c->is_resp = 0;
+    free(body);
+}
+
 static void handle_redirect(struct mg_connection *c, int ev, void *ev_data) {
     if (ev == MG_EV_HTTP_MSG) {
         struct mg_http_message *hm = (struct mg_http_message *)ev_data;
@@ -669,6 +823,15 @@ static void handle_redirect(struct mg_connection *c, int ev, void *ev_data) {
     }
 }
 
+/* Per-part size cap for /upload, matching the listener-wide MG_MAX_RECV_SIZE
+   intent of 100 MiB. Mongoose buffers the entire multipart body before
+   dispatching MG_EV_HTTP_MSG, so this cap is on each individual part. */
+#define UPLOAD_MAX_PART_BYTES (100UL * 1024UL * 1024UL)
+
+static bool method_is(struct mg_http_message *hm, const char *m) {
+    return mg_match(hm->method, mg_str(m), NULL);
+}
+
 static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
     if (ev == MG_EV_ACCEPT) {
         struct mg_tls_opts opts = {0};
@@ -680,60 +843,123 @@ static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
         struct mg_http_serve_opts sopts = {0};
         sopts.root_dir = s_web_root;
 
-        if (uri_equals(hm->uri, "/upload") &&
-            mg_match(hm->method, mg_str("POST"), NULL)) {
+        if (uri_equals(hm->uri, "/upload")) {
+            if (!method_is(hm, "POST")) {
+                mg_http_reply(c, 405, "Allow: POST\r\nConnection: close\r\n",
+                              "Method Not Allowed\n");
+                c->is_draining = 1;
+                return;
+            }
             struct mg_http_part part; size_t ofs = 0;
             ensure_upload_dir();
+            int saved = 0, skipped = 0;
+            const char *err = NULL;
+            int err_status = 0;
             while ((ofs = mg_http_next_multipart(hm->body, ofs, &part)) != 0) {
-                if (part.filename.len > 0) {
-                    /* sanitize filename: find last path separator */
-                    const char *fname = part.filename.buf;
-                    size_t flen = part.filename.len;
-                    size_t start = 0;
-                    for (size_t k = 0; k < flen; k++) {
-                        if (fname[k] == '/' || fname[k] == '\\')
-                            start = k + 1;
-                    }
-                    fname += start;
-                    flen  -= start;
-                    /* reject empty, dotfiles, and names containing
-                       null bytes or characters outside the allowlist */
-                    if (flen == 0 || fname[0] == '.') continue;
-                    bool bad = false;
-                    for (size_t k = 0; k < flen; k++) {
-                        char ch = fname[k];
-                        if (ch == '\0') { bad = true; break; }
-                        bool ok = (ch >= 'a' && ch <= 'z') ||
-                                  (ch >= 'A' && ch <= 'Z') ||
-                                  (ch >= '0' && ch <= '9') ||
-                                  ch == '.' || ch == '_' || ch == '-';
-                        if (!ok) { bad = true; break; }
-                    }
-                    if (bad) continue;
-                    char path[512];
-                    snprintf(path, sizeof(path), "%s/%.*s", s_upload_dir,
-                             (int)flen, fname);
-                    FILE *fp = fopen(path, "wb");
-                    if (fp) {
-                        fwrite(part.body.buf, 1, part.body.len, fp);
-                        fclose(fp);
-                        printf("[+] Uploaded: %s\n", path);
-                        mg_http_reply(c, 200, "", "Uploaded %s\n", path);
-                    } else {
-                        mg_http_reply(c, 500, "", "Write failed\n");
-                    }
+                if (part.filename.len == 0) continue;
+                if (part.body.len > UPLOAD_MAX_PART_BYTES) {
+                    err = "Upload part exceeds 100 MiB limit\n";
+                    err_status = 413;
+                    break;
                 }
+                /* sanitize filename: strip path components */
+                const char *fname = part.filename.buf;
+                size_t flen = part.filename.len;
+                size_t start = 0;
+                for (size_t k = 0; k < flen; k++) {
+                    if (fname[k] == '/' || fname[k] == '\\')
+                        start = k + 1;
+                }
+                fname += start;
+                flen  -= start;
+                if (flen == 0 || fname[0] == '.') { skipped++; continue; }
+                /* cap filename length so the assembled path[512] cannot be
+                   silently truncated by snprintf below (NAME_MAX = 255 on
+                   typical Linux filesystems). */
+                if (flen > 255) { skipped++; continue; }
+                bool bad = false;
+                for (size_t k = 0; k < flen; k++) {
+                    char ch = fname[k];
+                    if (ch == '\0') { bad = true; break; }
+                    bool ok = (ch >= 'a' && ch <= 'z') ||
+                              (ch >= 'A' && ch <= 'Z') ||
+                              (ch >= '0' && ch <= '9') ||
+                              ch == '.' || ch == '_' || ch == '-';
+                    if (!ok) { bad = true; break; }
+                }
+                if (bad) { skipped++; continue; }
+                char path[512];
+                snprintf(path, sizeof(path), "%s/%.*s", s_upload_dir,
+                         (int)flen, fname);
+                FILE *fp = fopen(path, "wb");
+                if (!fp) {
+                    err = "Write failed\n";
+                    err_status = 500;
+                    break;
+                }
+                size_t wr = fwrite(part.body.buf, 1, part.body.len, fp);
+                int fc = fclose(fp);
+                if (wr != part.body.len || fc != 0) {
+                    remove(path);
+                    err = "Write failed\n";
+                    err_status = 500;
+                    break;
+                }
+                printf("[+] Uploaded: %s (%lu bytes)\n",
+                       path, (unsigned long)part.body.len);
+                saved++;
+            }
+            if (err) {
+                mg_http_reply(c, err_status, "Connection: close\r\n", "%s", err);
+                c->is_draining = 1;
+            } else {
+                /* Keep-alive on success: Connection: close + is_draining here
+                   broke Edge's subsequent download (HEAD pre-flight on the
+                   reused TLS conn would race with our drain). Matches v1.4.2. */
+                mg_http_reply(c, 200, "",
+                              "Uploaded %d file(s), skipped %d\n", saved, skipped);
             }
             return;
         }
 
         /* /uploads/ route removed — was exposing sensitive data without auth */
-        if (uri_equals(hm->uri, "/mCollector.ps1"))
-            { mg_http_serve_file(c, hm, "mCollector.ps1", &sopts); return; }
-        if (uri_equals(hm->uri, "/PingCastle.exe"))
-            { mg_http_serve_file(c, hm, "PingCastle.exe", &sopts); return; }
-        if (uri_equals(hm->uri, "/"))
-            { mg_http_serve_file(c, hm, "index.html", &sopts); return; }
+        if (uri_equals(hm->uri, "/mCollector.ps1")) {
+            if (!method_is(hm, "GET") && !method_is(hm, "HEAD")) {
+                mg_http_reply(c, 405, "Allow: GET, HEAD\r\n",
+                              "Method Not Allowed\n");
+                return;
+            }
+            /* Match v1.4.2 wire behavior exactly: mg_http_serve_file on a
+               .ps1 file with no extension override falls through to the
+               default "text/plain; charset=utf-8" mime. */
+            serve_embedded(c, hm, mCollector_ps1, mCollector_ps1_len,
+                           "text/plain; charset=utf-8");
+            return;
+        }
+        if (uri_equals(hm->uri, "/PingCastle.exe")) {
+            if (!method_is(hm, "GET") && !method_is(hm, "HEAD")) {
+                mg_http_reply(c, 405, "Allow: GET, HEAD\r\n",
+                              "Method Not Allowed\n");
+                return;
+            }
+            /* Plain mg_http_serve_file — same call shape as v1.4.2. The
+               built-in mime table maps .exe to application/octet-stream,
+               and Mongoose handles HEAD, Range, Etag, and async streaming
+               internally. Do NOT add Content-Disposition or Connection:
+               close here: that broke Edge's HEAD→GET pre-flight in PR #9. */
+            mg_http_serve_file(c, hm, "PingCastle.exe", &sopts);
+            return;
+        }
+        if (uri_equals(hm->uri, "/")) {
+            if (!method_is(hm, "GET") && !method_is(hm, "HEAD")) {
+                mg_http_reply(c, 405, "Allow: GET, HEAD\r\n",
+                              "Method Not Allowed\n");
+                return;
+            }
+            serve_embedded(c, hm, index_html, index_html_len,
+                           "text/html; charset=utf-8");
+            return;
+        }
         mg_http_reply(c, 301, "Location: /\r\n", "");
     }
 }
