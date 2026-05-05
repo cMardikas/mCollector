@@ -711,20 +711,29 @@ static char *substitute_server_ip(const unsigned char *in, size_t in_len,
 
 static void serve_embedded(struct mg_connection *c,
                            const unsigned char *data, size_t len,
-                           const char *content_type) {
+                           const char *content_type,
+                           const char *download_filename) {
     char ip[64];
     get_active_adapter_ip(c, ip, sizeof(ip));
     if (!ip[0]) snprintf(ip, sizeof(ip), "127.0.0.1");
     size_t out_len = 0;
     char *body = substitute_server_ip(data, len, ip, &out_len);
     if (!body) { mg_http_reply(c, 500, "", "alloc failed\n"); return; }
+    char disp[128] = "";
+    if (download_filename && download_filename[0]) {
+        snprintf(disp, sizeof(disp),
+                 "Content-Disposition: attachment; filename=\"%s\"\r\n",
+                 download_filename);
+    }
     mg_printf(c,
               "HTTP/1.1 200 OK\r\n"
               "Content-Type: %s\r\n"
               "Content-Length: %lu\r\n"
+              "%s"
+              "Cache-Control: no-store\r\n"
               "Connection: close\r\n"
               "\r\n",
-              content_type, (unsigned long)out_len);
+              content_type, (unsigned long)out_len, disp);
     mg_send(c, body, out_len);
     c->is_resp = 0;
     free(body);
@@ -807,14 +816,14 @@ static void handle_request(struct mg_connection *c, int ev, void *ev_data) {
         /* /uploads/ route removed — was exposing sensitive data without auth */
         if (uri_equals(hm->uri, "/mCollector.ps1")) {
             serve_embedded(c, mCollector_ps1, mCollector_ps1_len,
-                           "application/octet-stream");
+                           "application/octet-stream", "mCollector.ps1");
             return;
         }
         if (uri_equals(hm->uri, "/PingCastle.exe"))
             { mg_http_serve_file(c, hm, "PingCastle.exe", &sopts); return; }
         if (uri_equals(hm->uri, "/")) {
             serve_embedded(c, index_html, index_html_len,
-                           "text/html; charset=utf-8");
+                           "text/html; charset=utf-8", NULL);
             return;
         }
         mg_http_reply(c, 301, "Location: /\r\n", "");

