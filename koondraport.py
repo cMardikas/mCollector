@@ -147,18 +147,31 @@ def parse_antivirus(content):
     Returns a list of dicts: [{name, enabled, up_to_date, raw_state}, ...].
     Handles both the single-object and array forms of the Antivirus block.
     """
-    m = re.search(r'"Antivirus"\s*:\s*(\[[^\]]*\]|\{[^\{\}]*\})', content, re.DOTALL)
-    if not m:
-        return []
-    block = m.group(1)
-    # Allow multiple objects (array) or a single object
-    entries = re.findall(r'\{[^\{\}]*\}', block, re.DOTALL)
-    if not entries:
-        entries = [block]
+    try:
+        av_data = json.loads(content).get('Antivirus', [])
+        if isinstance(av_data, dict):
+            entries = [av_data]
+        elif isinstance(av_data, list):
+            entries = [e for e in av_data if isinstance(e, dict)]
+        else:
+            entries = []
+    except (json.JSONDecodeError, AttributeError):
+        m = re.search(r'"Antivirus"\s*:\s*(\[[^\]]*\]|\{[^\{\}]*\})', content, re.DOTALL)
+        if not m:
+            return []
+        block = m.group(1)
+        # Allow multiple objects (array) or a single object
+        entries = re.findall(r'\{[^\{\}]*\}', block, re.DOTALL)
+        if not entries:
+            entries = [block]
     products = []
     for entry in entries:
-        name = extract(r'"displayName"\s*:\s*"([^"]+)"', entry) or ''
-        state_str = extract(r'"productState"\s*:\s*(\d+)', entry)
+        if isinstance(entry, dict):
+            name = entry.get('displayName') or ''
+            state_str = entry.get('productState')
+        else:
+            name = extract(r'"displayName"\s*:\s*"([^"]+)"', entry) or ''
+            state_str = extract(r'"productState"\s*:\s*(\d+)', entry)
         if not state_str:
             continue
         try:
