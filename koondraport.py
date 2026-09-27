@@ -314,7 +314,11 @@ def compute_host_metrics(host, matrix):
             lagging.append(entry)
 
     user_clean = host['user'].split("\\")[-1] if "\\" in host['user'] else host['user']
-    is_admin_user = any(a.lower() == user_clean.lower() for a in host['admins'])
+    is_admin_user = any(
+        a.casefold() == host['user'].casefold()
+        or ("\\" not in a and a.casefold() == user_clean.casefold())
+        for a in host['admins']
+    )
     # Antivirus: any registered AV product (Defender, ESET, Bitdefender,
     # Norton, Kaspersky, McAfee, Sophos, CrowdStrike, ...) counts.
     # Fall back to the legacy 'Windows Defender' block if the Antivirus
