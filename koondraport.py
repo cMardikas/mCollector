@@ -19,7 +19,7 @@ import urllib.request
 from datetime import datetime, timezone
 from html import escape as h
 
-__version__ = '1.4.6'
+__version__ = '1.4.8'
 
 UPLOAD_DIR = 'uploads'
 OUTPUT_PREFIX = 'koondraport'
